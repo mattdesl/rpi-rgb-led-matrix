@@ -37,7 +37,7 @@ class RotatingBlockGenerator(SampleBase):
         offset_canvas = self.matrix.CreateFrameCanvas()
 
         while True:
-            rotation += 1
+            rotation += 5
             rotation %= 360
 
             for x in range(int(min_rotate), int(max_rotate)):

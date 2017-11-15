@@ -5,6 +5,7 @@
 ##
 OBJECTS=gpio.o led-matrix.o options-initialize.o framebuffer.o \
         thread.o bdf-font.o graphics.o transformer.o led-matrix-c.o \
+        FastNoise.o \
 	hardware-mapping.o content-streamer.o
 TARGET=librgbmatrix
 
@@ -23,7 +24,7 @@ TARGET=librgbmatrix
 #   regular-pi1        # If you have an old Pi1 and regular didn't work.
 #   classic            # (deprecated) Classic Pi1/2/. Not used anymore.
 #   classic-pi1        # (deprecated) Classic pinout on Rasperry Pi 1
-HARDWARE_DESC?=regular
+HARDWARE_DESC?=adafruit-hat
 
 ###
 # After you change any of the following DEFINES, make sure to 'make' again.
@@ -127,7 +128,7 @@ DEFINES+=$(USER_DEFINES)
 DEFINES+=-DDEFAULT_HARDWARE='"$(HARDWARE_DESC)"'
 INCDIR=../include
 CFLAGS=-Wall -O3 -g -fPIC $(DEFINES)
-CXXFLAGS=$(CFLAGS)
+CXXFLAGS=-Wall -O3 -g -fPIC -std=c++11 $(DEFINES)
 
 all : $(TARGET).a $(TARGET).so.1
 
