@@ -44,9 +44,12 @@ int AMG88xx_INTC = 0x03;
 int AMG88xx_TTHL = 0x0E;
 int AMG88xx_PIXEL_OFFSET = 0x80;
 int AMG88xx_INITIAL_RESET = 0x3F;
-int AMG88xx_PIXEL_ARRAY_SIZE = 64;
+#define AMG88xx_PIXEL_ARRAY_SIZE 64
 double AMG88xx_PIXEL_TEMP_CONVERSION = 0.25;
 double AMG88xx_THERMISTOR_CONVERSION = 0.0625;
+
+float MINTEMP = 22; // 26
+float MAXTEMP = 30; // 32
 
 int i2c;
 bool hasI2C = true;
@@ -65,38 +68,21 @@ float smoothstep (float v0, float v1, float t) {
   return x * x * (3.0 - 2.0 * x);
 }
 
-class ColorRGB {
-public:
-  int r;
-  int g;
-  int b;
+float clamp (float v, float minVal, float maxVal) {
+  return max(minVal, min(maxVal, v));
+}
 
-  ColorRGB(int _r, int _g, int _b) {
-    r = _r;
-    g = _g;
-    b = _b;
-  }
-  void copy (ColorRGB *other) {
-    r = other->r;
-    g = other->g;
-    b = other->b;
-  }
-  void lerp (ColorRGB *color, float alpha) {
-		r += (color->r - r) * alpha;
-		g += (color->g - g) * alpha;
-    b += (color->b - b) * alpha;
-    r = max(0, min(255, r));
-    g = max(0, min(255, g));
-    b = max(0, min(255, b));
-  }
-};
+float lerp (float v0, float v1, float t) {
+  return v0*(1-t)+v1*t;
+}
 
-class Sensor {
-public:
-  Sensor(int addr) {
-    
-  }
-};
+float unlerp (float minVal, float maxVal, float value) {
+  return (value - minVal) / (maxVal - minVal);
+}
+
+float unlerpClamp (float minVal, float maxVal, float value) {
+  return unlerp(minVal, maxVal, clamp(value, minVal, maxVal));
+}
 
 void writeI2C () {
   try {
@@ -130,16 +116,243 @@ float readThermistor () {
   }
 }
 
+void readPixels (float *buf) {
+  // float converted;
+	// uint8_t bytesToRead = min(size << 1, AMG88xx_PIXEL_ARRAY_SIZE << 1);
+	// uint8_t rawArray[bytesToRead];
+	// this->read(AMG88xx_PIXEL_OFFSET, rawArray, bytesToRead);
+	
+	for(int i = 0; i < AMG88xx_PIXEL_ARRAY_SIZE; i++){
+    uint16_t raw = wiringPiI2CReadReg16(i2c, AMG88xx_PIXEL_OFFSET + (i << 1));
+    float converted = signedMag12ToFloat(raw) * AMG88xx_PIXEL_TEMP_CONVERSION;
+    buf[i] = converted;
+	}
+}
+
+class Vec2 {
+public:
+  float x;
+  float y;
+
+  Vec2(int _x, int _y) {
+    x = _x;
+    y = _y;
+  }
+  void copy (Vec2 *other) {
+    x = other->x;
+    y = other->y;
+  }
+  void set (float _x, float _y) {
+    x = _x;
+    y = _y;
+  }
+  void lerp (Vec2 *other, float alpha) {
+		x += (other->x - x) * alpha;
+		y += (other->y - y) * alpha;
+  }
+  float length () {
+    return sqrt(x * x + y * y);
+  }
+  float lengthSq () {
+    return x * x + y * y;
+  }
+};
+
+class ColorRGB {
+public:
+  int r;
+  int g;
+  int b;
+
+  ColorRGB(int _r, int _g, int _b) {
+    r = _r;
+    g = _g;
+    b = _b;
+  }
+  void setRGBFloat (float rf, float gf, float bf) {
+    r = (int)(rf * 255);
+    g = (int)(gf * 255);
+    b = (int)(bf * 255);
+  }
+  void clampBytes () {
+    r = clamp(r, 0, 255);
+    g = clamp(g, 0, 255);
+    b = clamp(b, 0, 255);
+  }
+  void copy (ColorRGB *other) {
+    r = other->r;
+    g = other->g;
+    b = other->b;
+  }
+  void lerp (ColorRGB *color, float alpha) {
+		r += (color->r - r) * alpha;
+		g += (color->g - g) * alpha;
+    b += (color->b - b) * alpha;
+    clampBytes();
+  }
+};
+
 // Simple class that generates a rotating block on the screen.
 class SDFGen : public ThreadedCanvasManipulator {
 public:
   typedef std::chrono::high_resolution_clock clock_;
   typedef std::chrono::duration<double, std::ratio<1> > second_;
   std::chrono::time_point<clock_> lastTime;
-  
+  Vec2 *tempVec = new Vec2(0, 0);
+  float temperatures[AMG88xx_PIXEL_ARRAY_SIZE];
+  float scaledTemperatures[AMG88xx_PIXEL_ARRAY_SIZE];
+  float velocities[AMG88xx_PIXEL_ARRAY_SIZE];
+
   SDFGen(Canvas *m) : ThreadedCanvasManipulator(m) {}
 
-  void Run() {
+  void Run () {
+    int width = canvas()->width();
+    int height = canvas()->height();
+    ColorRGB *COLOR_BLACK = new ColorRGB(0, 0, 0);
+    ColorRGB *fragColor = new ColorRGB(0, 0, 0);
+
+    // start time
+    lastTime = clock_::now();
+    double currentTime = 0.0;
+    double sensorTime = 0.0;
+    double sensorFPS = 10.0; // update thermal cam at 10 FPS
+    double sensorInterval = 1.0 / sensorFPS;
+
+    float velocityFactor = 0.25;
+    float maxVelocity = 1.0;
+    float velocityFriction = 0.9;
+    for (int i = 0; i < AMG88xx_PIXEL_ARRAY_SIZE; i++) {
+      velocities[i] = 0;
+      scaledTemperatures[i] = 0;
+    }
+
+    while (running() && !interrupt_received) {
+      std::chrono::time_point<clock_> newTime = clock_::now();
+      double dt = std::chrono::duration_cast<second_>(newTime - lastTime).count();
+      currentTime += dt;
+      lastTime = newTime;
+      sensorTime += dt;
+      if (hasI2C && sensorTime > sensorInterval) {
+        sensorTime = 0.0;
+        readPixels(temperatures);
+        for (int i = 0; i < AMG88xx_PIXEL_ARRAY_SIZE; i++) {
+          float temperature = temperatures[i];
+          // get scaled in 0 - 1 range
+          float scaled = unlerpClamp(MINTEMP, MAXTEMP, temperature);
+          scaledTemperatures[i] = scaled;
+
+          // increase velocity based on how warm it is
+          velocities[i] += velocityFactor * unlerpClamp(22, 28, temperature);
+        }
+      }
+
+      usleep(15 * 1000);
+
+      // clamp and apply friction
+      for (int i = 0; i < AMG88xx_PIXEL_ARRAY_SIZE; i++) {
+        velocities[i] = min(maxVelocity, velocities[i]);
+        velocities[i] *= velocityFriction;
+      }
+
+      for (int i = 0; i < width * height; i++) {
+        float x = floor(fmod((float)i, (float)width));
+        float y = floor((float)i / width);
+
+        // int y = i / width;
+        // int x = i - width * y;
+        // float radius = 0.5 + 0.5 * (noise.GetNoise(px * 100, py * 100, tick) * 0.5 + 0.5);
+        float px = (x / (float)width);
+        float py = (y / (float)height);
+        fragColor->copy(COLOR_BLACK);
+        pixelShader(px, py, (float)width, (float)height, fragColor);
+        fragColor->clampBytes();
+        canvas()->SetPixel(x, y, fragColor->r, fragColor->g, fragColor->b);
+      }
+      // float cols = 8;
+      // float rows = 8;
+      // for (int i = 0; i < cols * rows; i++) {
+      //   int x = (int)(fmod((float)i, (float)cols));
+      //   int y = (int)((float)i / cols);
+      //   float temperature = pixels[i];
+      //   float v = unlerpClamp(MINTEMP, MAXTEMP, temperature);
+      //   fragColor->setRGBFloat(v, v, v);
+      //   canvas()->SetPixel(x, y, fragColor->r, fragColor->g, fragColor->b);
+      // }
+    }
+  }
+
+  void pixelShader (float xCoord, float yCoord, float width, float height, ColorRGB *fragColor) {
+    float aspect = width / height;
+    
+    float distance = 0.0;
+    float cols = 8;
+    float rows = 8;
+    for (int i = 0; i < cols * rows; i++) {
+      float srcX = floor(fmod((float)i, (float)cols));
+      float srcY = floor((float)i / cols);
+      float tempScale = velocities[i];
+      
+      float spacing = 0.35;
+      float dstX = spacing * ((srcX / (cols-1)) * 2 - 1);
+      float dstY = spacing * ((srcY / (rows-1)) * 2 - 1);
+      float radius = 0.05 * tempScale;
+      float smoothness = 0.2;
+      tempVec->set((xCoord - 0.5 + dstX) * aspect, (yCoord - 0.5 + dstY));
+
+      float dist = tempVec->length();
+      float circleDist = smoothstep(radius + smoothness / 2.0, radius - smoothness / 2.0, dist);
+      distance += circleDist;
+    }
+
+    // tempVec->set((xCoord - 0.5 + 0) * aspect, (yCoord - 0.5 + 0));
+    // float dist = tempVec->length();
+    // distance += smoothstep(0.5, 0.45, dist);
+
+    fragColor->setRGBFloat(distance, distance, distance);
+
+    // px *= width / (float)height;
+
+    // // float c = (noise.GetNoise(px * zoom, py * zoom, tick * 3.0) * 0.5 + 0.5);
+    // float dx = px;
+    // float dy = py;
+    // float dist = sqrt(dx * dx + dy * dy);
+    
+    // // Number of sides of your shape
+    // int sides = 6;
+
+    // // Angle and radius from the current pixel
+    // float a = atan2(px, py) + M_PI + tick * 0.01;
+    // float r = (M_PI * 2.0) / (float)sides;
+    
+    // // Shaping function that modulate the distance
+    // float zoom = lerpf(0.05, 4.0, (sin(tick * 0.05) * 0.5 + 0.5));
+    // float sdf = cosf(floor(0.5f + a / r) * r - a) * dist * (1.0f / 1.0) + tick * -0.02;
+    // float value = sinf(sdf * 18.0) * 0.5 + 0.5;
+    // value = smoothstep(0.0, 1.0, value);
+    // // float value = smoothstep(0.5, 0.51, sdf);
+    // // color = vec3(1.0-smoothstep(.4,.41,sdf));
+
+    // // float zoom = 3.0;//lerpf(10.0, 200.0, sinf(tick * 0.005) * 0.5 + 0.5);
+    // // float ripples = (noise.GetNoise(px * zoom, py * zoom, tick * 1.0) * 8.0);
+    // // float c = sinf(ripples * dist + tick * 0.05) * 0.5 + 0.5;
+
+    // //place pixel
+    // int C = (int)(value * 255);
+    // float blue = sinf(tick * 0.025) * 0.5 + 0.5;
+    // // colorTemp2->r = C;
+    // // colorTemp2->g = C;
+    // // colorTemp2->b = C;
+    
+    // // colorTemp2->copy(colorRed);
+    // // colorTemp2->lerp(colorBlue, value);
+    
+    // colorTemp1->copy(colorRed);
+    // colorTemp1->lerp(colorBlue, blue);
+    // colorTemp2->copy(colorTemp1);
+    // colorTemp2->lerp(colorB, value);
+  }
+
+  void Run2() {
     int width = canvas()->width();
     int height = canvas()->height();
     float tick = 0;
@@ -154,7 +367,6 @@ public:
     FastNoise noise; // Create a FastNoise object
     noise.SetNoiseType(FastNoise::Simplex); // Set the desired noise type
 
-    writeI2C();
     printf("Running...\n");
 
     // start time
@@ -163,6 +375,7 @@ public:
     double sensorTime = 0.0;
     double sensorFPS = 10.0;
     double sensorInterval = 1.0 / sensorFPS;
+    float pixels[AMG88xx_PIXEL_ARRAY_SIZE];
 
     // Color *colorB = new Color()
     while (running() && !interrupt_received) {
@@ -173,16 +386,15 @@ public:
       sensorTime += dt;
       if (sensorTime > sensorInterval) {
         sensorTime = 0.0;
-
-        printf("THERMISTOR %f\n", readThermistor());
+        readPixels(pixels);
+        printf("PIXELS %f %f\n", pixels[0], pixels[1]);
+        // printf("THERMISTOR %f\n", readThermistor());
       }
 
       usleep(15 * 1000);
 
       tick += 0.5;
-      //If you want to do per-pixel modifications, it might look like this:
       for (int i=0; i<width * height; i++) {
-
         float x = floor(fmod((float)i, (float)width));
         float y = floor((float)i / width);
         // int y = i / width;
@@ -231,84 +443,6 @@ public:
         colorTemp2->copy(colorTemp1);
         colorTemp2->lerp(colorB, value);
         canvas()->SetPixel(x, y, colorTemp2->r, colorTemp2->g, colorTemp2->b);
-        // pixels[i] = (C << 16) | (C << 8) | C;
-     }
-    }
-  }
-};
-
-// Simple class that generates a rotating block on the screen.
-class SDFGen2 : public ThreadedCanvasManipulator {
-public:
-  SDFGen2(Canvas *m) : ThreadedCanvasManipulator(m) {}
-
-  void Run() {
-    int width = canvas()->width();
-    int height = canvas()->height();
-    float tick = 0;
-    // ColorRGB *colorA = new ColorRGB(255, 255, 255);
-    ColorRGB *colorRed = new ColorRGB(239, 21, 21);
-    ColorRGB *colorBlue = new ColorRGB(18, 160, 226);
-    ColorRGB *colorB = new ColorRGB(0, 0, 0);
-    // ColorRGB *colorB = new ColorRGB(0, 0, 0);
-    ColorRGB *colorTemp1 = new ColorRGB(0, 0, 0);
-    ColorRGB *colorTemp2 = new ColorRGB(0, 0, 0);
-
-    FastNoise noise; // Create a FastNoise object
-    noise.SetNoiseType(FastNoise::Simplex); // Set the desired noise type
-    
-    // Color *colorB = new Color()
-    while (running() && !interrupt_received) {
-      usleep(15 * 1000);
-      tick += 0.5;
-      //If you want to do per-pixel modifications, it might look like this:
-      for (int i=0; i<width * height; i++) {
-        int y = i / width;
-        int x = i - width*y;
-        // float radius = 0.5 + 0.5 * (noise.GetNoise(px * 100, py * 100, tick) * 0.5 + 0.5);
-        float px = (x / (float)width) * 2.0 - 1.0;
-        float py = (y / (float)width) * 2.0 - 1.0;
-        float zoom = lerpf(10.0, 200.0, sinf(tick * 0.005) * 0.5 + 0.5);
-        float c = (noise.GetNoise(px * zoom, py * zoom, tick * 3.0) * 0.5 + 0.5);
-
-        // float px = (2*(x/(float)width-.5f)) * (width/(float)height);
-        // float py = (2*(y/(float)height-.5f));
-        
-        // float radius = 1;
-        
-        // // evaluate z-depth of sphere
-        // float z = sqrt(radius * radius - px*px - py*py);
-        // // float zOff = 2.5 * sinf(tick);
-        // // z += zOff;
-
-        // // evaluate normal of sphere
-        // float dist = sqrt(px * px + py * py + z * z);
-        // px/=dist; py/=dist; z/=dist;
-        
-        // //centered mouse position
-        // // float mx = 0;
-        // // float my = 0;
-        // float mx = sinf(tick * 0.15) * 1.0;
-        // float my = sinf(cosf(tick * 0.1)) * 1;
-        
-        // // float mx = mouseX/(float)width-.5f, my = mouseY/(float)height-.5f;
-        
-        // //normalize light direction
-        // dist = sqrt(mx*mx + my*my + 1);
-        // mx/=dist; my/=dist;
-
-        // // N dot L and clamp
-        // float c = max(0.0f, px * mx + py * my + z * (1 / dist));
-        
-        //place pixel
-        // int C = (int)(c*255);
-        float blue = sinf(tick * 0.025) * 0.5 + 0.5;
-        colorTemp1->copy(colorRed);
-        colorTemp1->lerp(colorBlue, blue);
-        colorTemp2->copy(colorTemp1);
-        colorTemp2->lerp(colorB, c);
-        canvas()->SetPixel(x, y, colorTemp2->r, colorTemp2->g, colorTemp2->b);
-        // pixels[i] = (C << 16) | (C << 8) | C;
      }
     }
   }
@@ -338,7 +472,7 @@ static int usage(const char *progname) {
 
 int main(int argc, char *argv[]) {
   int runtime_seconds = -1;
-  int demo = -1;
+  int demo = 0;
   int rotation = 0;
   bool large_display = false;
 
@@ -353,6 +487,7 @@ int main(int argc, char *argv[]) {
     printf("Could not open I2C connection...\n");
     hasI2C = false;
   }
+  writeI2C();
 
   RGBMatrix::Options matrix_options;
   rgb_matrix::RuntimeOptions runtime_opt;
@@ -366,71 +501,6 @@ int main(int argc, char *argv[]) {
   // relevant matrix options.
   if (!ParseOptionsFromFlags(&argc, &argv, &matrix_options, &runtime_opt)) {
     return usage(argv[0]);
-  }
-
-  int opt;
-  while ((opt = getopt(argc, argv, "dD:t:r:P:c:p:b:m:LR:")) != -1) {
-    switch (opt) {
-    case 'D':
-      demo = atoi(optarg);
-      break;
-
-    case 't':
-      runtime_seconds = atoi(optarg);
-      break;
-
-    case 'R':
-      rotation = atoi(optarg);
-      break;
-
-    case 'L':
-      if (matrix_options.chain_length == 1) {
-        // If this is still default, force the 64x64 arrangement.
-        matrix_options.chain_length = 4;
-      }
-      large_display = true;
-      break;
-
-      // These used to be options we understood, but deprecated now. Accept
-      // but don't mention in usage()
-    case 'd':
-      runtime_opt.daemon = 1;
-      break;
-
-    case 'r':
-      matrix_options.rows = atoi(optarg);
-      break;
-
-    case 'P':
-      matrix_options.parallel = atoi(optarg);
-      break;
-
-    case 'c':
-      matrix_options.chain_length = atoi(optarg);
-      break;
-
-    case 'p':
-      matrix_options.pwm_bits = atoi(optarg);
-      break;
-
-    case 'b':
-      matrix_options.brightness = atoi(optarg);
-      break;
-
-    default: /* '?' */
-      return usage(argv[0]);
-    }
-  }
-
-  if (demo < 0) {
-    fprintf(stderr, TERM_ERR "Expected required option -D <demo>\n" TERM_NORM);
-    return usage(argv[0]);
-  }
-
-  if (rotation % 90 != 0) {
-    fprintf(stderr, TERM_ERR "Rotation %d not allowed! "
-            "Only 0, 90, 180 and 270 are possible.\n" TERM_NORM, rotation);
-    return 1;
   }
 
   RGBMatrix *matrix = CreateMatrixFromOptions(matrix_options, runtime_opt);
