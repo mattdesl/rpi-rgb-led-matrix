@@ -13,6 +13,7 @@
     "__bit_reference": "cpp",
     "algorithm": "cpp",
     "limits": "cpp",
-    "ios": "cpp"
+    "ios": "cpp",
+    "deque": "cpp"
   }
 }
