@@ -20,6 +20,8 @@
 #include <stdlib.h>
 #include <unistd.h>
 
+#include <deque>
+
 #include <iostream>
 #include <chrono>
 
@@ -48,9 +50,6 @@ int AMG88xx_INITIAL_RESET = 0x3F;
 double AMG88xx_PIXEL_TEMP_CONVERSION = 0.25;
 double AMG88xx_THERMISTOR_CONVERSION = 0.0625;
 
-float MINTEMP = 22; // 26
-float MAXTEMP = 30; // 32
-
 int i2c;
 bool hasI2C = true;
 
@@ -77,6 +76,10 @@ float lerp (float v0, float v1, float t) {
 }
 
 float unlerp (float minVal, float maxVal, float value) {
+  if (minVal == maxVal) {
+    if (value > minVal) return 1;
+    else return 0;
+  }
   return (value - minVal) / (maxVal - minVal);
 }
 
@@ -199,31 +202,99 @@ public:
   typedef std::chrono::duration<double, std::ratio<1> > second_;
   std::chrono::time_point<clock_> lastTime;
   Vec2 *tempVec = new Vec2(0, 0);
+
+  ColorRGB *colorBlack = new ColorRGB(0, 0, 0);
+  ColorRGB *colorBlue = new ColorRGB(0, 0, 255);
+  ColorRGB *colorRed = new ColorRGB(255, 0, 0);
+  
+  // the raw 8x8 temperatures
   float temperatures[AMG88xx_PIXEL_ARRAY_SIZE];
-  float scaledTemperatures[AMG88xx_PIXEL_ARRAY_SIZE];
-  float velocities[AMG88xx_PIXEL_ARRAY_SIZE];
+
+  // tweened 8x8 temperatures
+  float interpolatedTemperatures[AMG88xx_PIXEL_ARRAY_SIZE];
+
+  // upscaled and smoothed temperatures
+  float *upscaledTemperatures;
+
+  float MINTEMP = 22; // 26
+  float MAXTEMP = 30; // 32
+
+  std::deque<float> movingAverages;
+  float movingAverageTemp = MINTEMP;
+  float targetTemp = 30;
+  float currentAverage = MINTEMP;
+
+  float newAverage = MINTEMP;
+  float periodTime = 20;
+  float interpolationSpeed = 0.15;
+
+  double currentTime = 0.0;
+  double sensorTime = 0.0;
+  double sensorFPS = 10.0; // update thermal cam at 10 FPS
+  double sensorInterval = 1.0 / sensorFPS;
+
+  int averagePeriod = (int)(periodTime * sensorFPS);
+  float newMovingAverageTemp = MINTEMP;
+  FastNoise noise; // Create a FastNoise object
 
   SDFGen(Canvas *m) : ThreadedCanvasManipulator(m) {}
+
+  void updatePixels () {
+    readPixels(temperatures);
+
+    // get the average temperature of the current set of pixels
+    // and the min / max temperature
+    newAverage = 0.0;
+    // float currentMin = MAXTEMP;
+    // float currentMax = MINTEMP;
+    for (int i = 0; i < AMG88xx_PIXEL_ARRAY_SIZE; i++) {
+      float temperature = temperatures[i];
+      newAverage += temperature;
+      // if (temperature < currentMin) currentMin = temperature;
+      // if (temperature > currentMax) currentMax = temperature;
+    }
+    newAverage /= AMG88xx_PIXEL_ARRAY_SIZE;
+
+    // compute the new rolling averages
+    movingAverages.push_back(newAverage);
+    if (movingAverages.size() > averagePeriod) {
+      movingAverages.pop_front();
+    }
+
+    int count = movingAverages.size();
+    newMovingAverageTemp = 0;
+    for (int i = 0; i < count; i++) {
+      newMovingAverageTemp += movingAverages[i];
+    }
+    newMovingAverageTemp /= count;
+  }
+
+  void resizePixels () {
+
+  }
+
+  void interpolateTemperature () {
+    movingAverageTemp = lerp(movingAverageTemp, newMovingAverageTemp, interpolationSpeed);
+    currentAverage = lerp(currentAverage, newAverage, interpolationSpeed);
+    for (int i = 0; i < AMG88xx_PIXEL_ARRAY_SIZE; i++) {
+      interpolatedTemperatures[i] = lerp(interpolatedTemperatures[i], temperatures[i], interpolationSpeed);
+    }
+  }
 
   void Run () {
     int width = canvas()->width();
     int height = canvas()->height();
-    ColorRGB *COLOR_BLACK = new ColorRGB(0, 0, 0);
     ColorRGB *fragColor = new ColorRGB(0, 0, 0);
+
+    noise.SetNoiseType(FastNoise::Simplex); // Set the desired noise type
 
     // start time
     lastTime = clock_::now();
-    double currentTime = 0.0;
-    double sensorTime = 0.0;
-    double sensorFPS = 10.0; // update thermal cam at 10 FPS
-    double sensorInterval = 1.0 / sensorFPS;
 
-    float velocityFactor = 0.25;
-    float maxVelocity = 1.0;
-    float velocityFriction = 0.9;
+    // clear temperatures
     for (int i = 0; i < AMG88xx_PIXEL_ARRAY_SIZE; i++) {
-      velocities[i] = 0;
-      scaledTemperatures[i] = 0;
+      temperatures[i] = MINTEMP;
+      interpolatedTemperatures[i] = MINTEMP;
     }
 
     while (running() && !interrupt_received) {
@@ -234,81 +305,95 @@ public:
       sensorTime += dt;
       if (hasI2C && sensorTime > sensorInterval) {
         sensorTime = 0.0;
-        readPixels(temperatures);
-        for (int i = 0; i < AMG88xx_PIXEL_ARRAY_SIZE; i++) {
-          float temperature = temperatures[i];
-          // get scaled in 0 - 1 range
-          float scaled = unlerpClamp(MINTEMP, MAXTEMP, temperature);
-          scaledTemperatures[i] = scaled;
-
-          // increase velocity based on how warm it is
-          velocities[i] += velocityFactor * unlerpClamp(22, 28, temperature);
-        }
+        updatePixels();
       }
 
       usleep(15 * 1000);
 
-      // clamp and apply friction
-      for (int i = 0; i < AMG88xx_PIXEL_ARRAY_SIZE; i++) {
-        velocities[i] = min(maxVelocity, velocities[i]);
-        velocities[i] *= velocityFriction;
-      }
+      // interpolate toward the new rolling averages
+      interpolateTemperature();
+      // printf("temp %f\n", newAverage);
 
       for (int i = 0; i < width * height; i++) {
-        float x = floor(fmod((float)i, (float)width));
-        float y = floor((float)i / width);
+        int x = (int)(fmod((float)i, (float)width));
+        int y = (int)((float)i / width);
+
+        // flip horizontally
+        // x = width - x - 1;
 
         // int y = i / width;
         // int x = i - width * y;
         // float radius = 0.5 + 0.5 * (noise.GetNoise(px * 100, py * 100, tick) * 0.5 + 0.5);
         float px = (x / (float)width);
         float py = (y / (float)height);
-        fragColor->copy(COLOR_BLACK);
-        pixelShader(px, py, (float)width, (float)height, fragColor);
+        fragColor->copy(colorBlack);
+        pixelShader(fragColor, x, y, px, py, (float)width, (float)height, i);
         fragColor->clampBytes();
-        canvas()->SetPixel(x, y, fragColor->r, fragColor->g, fragColor->b);
+
+        // flip image before rendering
+        int dstX = x;
+        int dstY = height - y - 1;
+        canvas()->SetPixel(dstX, dstY, fragColor->r, fragColor->g, fragColor->b);
       }
       // float cols = 8;
       // float rows = 8;
       // for (int i = 0; i < cols * rows; i++) {
       //   int x = (int)(fmod((float)i, (float)cols));
       //   int y = (int)((float)i / cols);
-      //   float temperature = pixels[i];
-      //   float v = unlerpClamp(MINTEMP, MAXTEMP, temperature);
+      //   float temperature = interpolatedTemperatures[i];
+      //   float v = unlerpClamp(movingAverageTemp, targetTemp, temperature);
       //   fragColor->setRGBFloat(v, v, v);
       //   canvas()->SetPixel(x, y, fragColor->r, fragColor->g, fragColor->b);
       // }
     }
   }
 
-  void pixelShader (float xCoord, float yCoord, float width, float height, ColorRGB *fragColor) {
+  void pixelShader (ColorRGB *fragColor, int x, int y, float xCoord, float yCoord, float width, float height, int index) {
     float aspect = width / height;
-    
-    float distance = 0.0;
-    float cols = 8;
-    float rows = 8;
-    for (int i = 0; i < cols * rows; i++) {
-      float srcX = floor(fmod((float)i, (float)cols));
-      float srcY = floor((float)i / cols);
-      float tempScale = velocities[i];
-      
-      float spacing = 0.35;
-      float dstX = spacing * ((srcX / (cols-1)) * 2 - 1);
-      float dstY = spacing * ((srcY / (rows-1)) * 2 - 1);
-      float radius = 0.05 * tempScale;
-      float smoothness = 0.2;
-      tempVec->set((xCoord - 0.5 + dstX) * aspect, (yCoord - 0.5 + dstY));
 
-      float dist = tempVec->length();
-      float circleDist = smoothstep(radius + smoothness / 2.0, radius - smoothness / 2.0, dist);
-      distance += circleDist;
-    }
+    int srcWidth = 8;
+    int srcHeight = 8;
+    int xRatio = (int)((srcWidth << 16) / width) + 1;
+    int yRatio = (int)((srcHeight << 16) / height) + 1;
+
+    int srcX = ((x * xRatio) >> 16);
+    int srcY = ((y * yRatio) >> 16);
+    float temp = interpolatedTemperatures[(srcY * srcWidth) + srcX];
+    float interaction = unlerpClamp(movingAverageTemp, targetTemp, temp);
+
+    float zoom = 100;
+    float c = (noise.GetNoise(xCoord * zoom * aspect, yCoord * zoom, currentTime * 50) * 0.5 + 0.5);
+    fragColor->copy(colorBlue);
+    fragColor->lerp(colorBlack, c);
+
+    fragColor->lerp(colorRed, interaction * lerp(0.85, 1.0, c));
+    // fragColor->setRGBFloat(distance, distance, distance);
+
+    // float distance = unlerpClamp(movingAverageTemp, targetTemp, currentAverage);
+    
+    // float distance = 0.0;
+    // float cols = 8;
+    // float rows = 8;
+    // for (int i = 0; i < cols * rows; i++) {
+    //   float srcX = floor(fmod((float)i, (float)cols));
+    //   float srcY = floor((float)i / cols);
+    //   float tempScale = unlerpClamp(movingAverageTemp, targetTemp, interpolatedTemperatures[i]);
+
+    //   float spacing = 0.35;
+    //   float dstX = spacing * ((srcX / (cols-1)) * 2 - 1);
+    //   float dstY = spacing * ((srcY / (rows-1)) * 2 - 1);
+    //   float radius = 0.2 * tempScale;
+    //   float smoothness = 0.2;
+    //   tempVec->set((xCoord - 0.5 + dstX) * aspect, (yCoord - 0.5 + dstY));
+
+    //   float dist = tempVec->length();
+    //   float circleDist = smoothstep(radius, radius - smoothness, dist);
+    //   distance += circleDist;
+    // }
 
     // tempVec->set((xCoord - 0.5 + 0) * aspect, (yCoord - 0.5 + 0));
     // float dist = tempVec->length();
     // distance += smoothstep(0.5, 0.45, dist);
-
-    fragColor->setRGBFloat(distance, distance, distance);
 
     // px *= width / (float)height;
 

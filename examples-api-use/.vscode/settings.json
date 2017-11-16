@@ -2,6 +2,17 @@
   "files.associations": {
     "locale": "cpp",
     "memory": "cpp",
-    "bitset": "cpp"
+    "bitset": "cpp",
+    "string": "cpp",
+    "list": "cpp",
+    "__locale": "cpp",
+    "initializer_list": "cpp",
+    "iterator": "cpp",
+    "utility": "cpp",
+    "chrono": "cpp",
+    "__bit_reference": "cpp",
+    "algorithm": "cpp",
+    "limits": "cpp",
+    "ios": "cpp"
   }
 }
