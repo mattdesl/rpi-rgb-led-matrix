@@ -60,6 +60,87 @@ float RENDER_FPS = 30;
 int i2c;
 bool hasI2C = true;
 
+#define LED_PANEL_SIZE 32
+#define LED_PANEL_COUNT 6
+#define LED_PIXELS_WIDTH LED_PANEL_SIZE * 3
+#define LED_PIXELS_HEIGHT LED_PANEL_SIZE * 3
+#define LED_PIXEL_COUNT LED_PIXELS_WIDTH * LED_PIXELS_HEIGHT
+#define LED_OUTPUT_WIDTH LED_PANEL_COUNT * LED_PANEL_SIZE
+
+int pixelLookupX[LED_PIXEL_COUNT];
+int pixelLookupY[LED_PIXEL_COUNT];
+bool usePixelLookup = false;
+
+bool remapPixels (int& x, int& y) {
+  int width = LED_PIXELS_WIDTH;
+  int height = LED_PIXELS_HEIGHT;
+
+  // now we remap this pixel to the new space
+  int nx = x;
+  int ny = y;
+
+  // find out which row we are on
+  int row;
+  if (y >= 0 && y < 32) row = 0;
+  else if (y >= 32 && y < 64) row = 1;
+  else if (y >= 64 && y < 96) row = 2;
+  else return false;
+
+  if (row == 0) {
+    // outside of top row bounds
+    if (x < 32 || x >= 64) return false;
+    // center top row of pixels
+    nx -= 32;
+  } else if (row == 1) {
+    // outside of middle row bounds
+    if (x < 16 || x >= 80) return false;
+    // remap the Y value to the single row format
+    ny -= 32;
+
+    if (x >= 16 && x < 48) {
+      // middle row, left panel...
+      // third panel in the chain
+      
+      // remove border
+      nx -= 16;
+      // now offset & flip horizontally to correct position
+      nx = 64 + (32 - nx - 1);
+    } else {
+      // don't need to do anything here,
+      // srcX = (48..80) - border = 32..64
+      // dstX = 32..64
+
+      // remove border
+      nx -= 16;
+      // remove first panel
+      nx -= 32;
+      // offset and flip
+      nx = 32 + (32 - nx - 1);
+    }
+
+    // flip the Y value
+    ny = 32 - ny - 1;
+  } else {
+    // outside of bounds
+    if (x < 0 || x >= 96) return false;
+
+    // remap Y value to single row
+    ny -= 64;
+    // move to last 3 panels
+    nx += (3 * 32);
+  }
+
+  // apply remap
+  x = nx;
+  y = ny;
+  return true;
+}
+
+void generatePixelLookup () {
+  printf("Total pixels: %d\n", LED_PIXEL_COUNT);
+  usePixelLookup = true;
+}
+
 volatile bool interrupt_received = false;
 static void InterruptHandler(int signo) {
   interrupt_received = true;
@@ -302,47 +383,16 @@ public:
 
     canvas()->Fill(0, 0, 0);
     printf("WidthHeight %d x %d\n", width, height);
-    for (int i = 0; i < 32; i++) {
-      int x = 32 + i;
-      int y = 0;
+    for (int i = 0; i < 96; i++) {
+      int x = i;
+      int y = 33;
       float px = x / (float)width;
-      // int v = (int)(px*255);
+      int v = (int)(px*255);
       // printf("Setting %dx%d\n", x, y);
-      canvas()->SetPixel(x, y, 255, 0, 0);
+      if (remapPixels(x, y)) {
+        canvas()->SetPixel(x, y, v, 0, 0);
+      }
     }
-    // for (int i = 0; i < width * height; i++) {
-    //   int x = (int)(fmod((float)i, (float)width));
-    //   int y = (int)((float)i / width);
-    //   // if (y >= 0) {
-    //     canvas()->SetPixel(x, y, 255, 0, 0);
-    //   // }
-    // }
-    // while (running() && !interrupt_received) {
-    //   usleep(15 * 1000);
-      // for (int i = 0; i < width * height; i++) {
-      //   int x = (int)(fmod((float)i, (float)width));
-      //   int y = (int)((float)i / width);
-
-    //     float px = (x / (float)width);
-    //     float py = (y / (float)height);
-    //     fragColor->copy(colorBlack);
-
-    //     if (y >= 0 && y <= 32) {
-    //       fragColor->setRGBFloat(1, 0, 0);
-    //     } else if (y > 32 && y <= 64) {
-    //       fragColor->setRGBFloat(0, 1, 0);
-    //     } else if (y > 64 && y <= 96) {
-    //       fragColor->setRGBFloat(0, 0, 1);
-    //     }
-
-    //     fragColor->clampBytes();
-
-    //     // flip image before rendering
-    //     int dstX = x;
-    //     int dstY = y;
-    //     canvas()->SetPixel(dstX, dstY, fragColor->r, fragColor->g, fragColor->b);
-    //   }
-    // }
   }
 };
 
@@ -423,7 +473,9 @@ public:
           // flip image before rendering
           int dstX = x;
           int dstY = height - y - 1;
-          canvas()->SetPixel(dstX, dstY, fragColor->r, fragColor->g, fragColor->b);
+          if (remapPixels(dstX, dstY)) {
+            canvas()->SetPixel(dstX, dstY, fragColor->r, fragColor->g, fragColor->b);
+          }
         }
         // float cols = 8;
         // float rows = 8;
@@ -545,6 +597,7 @@ int main(int argc, char *argv[]) {
 
   if (matrix_options.chain_length > 3) {
     printf("Using LUMOS arrangement...\n");
+    generatePixelLookup();
     matrix->ApplyStaticTransformer(LumosArrangementTransformer());
   }
 
@@ -566,7 +619,7 @@ int main(int argc, char *argv[]) {
 
   // The ThreadedCanvasManipulator objects are filling
   // the matrix continuously.
-  ThreadedCanvasManipulator *image_gen = new TestView(canvas);
+  ThreadedCanvasManipulator *image_gen = new SDFGen(canvas);
 
   if (image_gen == NULL)
     return usage(argv[0]);

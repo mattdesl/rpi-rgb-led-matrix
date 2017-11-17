@@ -144,6 +144,170 @@ void LinkedTransformer::DeleteTransformers() {
   list_.clear();
 }
 
+// LUMOS Transformer
+class LumosArrangementTransformer::TransformCanvas : public Canvas {
+public:
+  TransformCanvas() : delegatee_(NULL) {}
+
+  void SetDelegatee(Canvas* delegatee);
+
+  virtual void Clear();
+  virtual void Fill(uint8_t red, uint8_t green, uint8_t blue);
+  virtual int width() const { return width_; }
+  virtual int height() const { return height_; }
+  virtual void SetPixel(int x, int y, uint8_t red, uint8_t green, uint8_t blue);
+
+private:
+  int panelWidth = 32;
+  int panelHeight = 32;
+  int panelsAcross = 6;
+  int panelsHigh = 1;
+
+  int width_ = panelWidth * panelsAcross;
+  int height_ = panelHeight * panelsHigh;
+
+  Canvas *delegatee_;
+};
+
+void LumosArrangementTransformer::TransformCanvas::SetDelegatee(Canvas* delegatee) {
+  delegatee_ = delegatee;
+}
+
+void LumosArrangementTransformer::TransformCanvas::Clear() {
+  delegatee_->Clear();
+}
+
+void LumosArrangementTransformer::TransformCanvas::Fill(
+  uint8_t red, uint8_t green, uint8_t blue) {
+  delegatee_->Fill(red, green, blue);
+}
+
+void LumosArrangementTransformer::TransformCanvas::SetPixel(
+  int x, int y, uint8_t red, uint8_t green, uint8_t blue) {
+  
+  int nx = x;
+  int ny = y;
+  int panel = (int)((float)x / panelWidth);
+  int panelX = x % panelWidth;
+  int row;
+  
+  // if (panel == 0) row = 0;
+  // else if (panel >= 2 && panel <= 1) row = 1;
+  // else if (panel >= 3 && panel <= 5) row = 2;
+  // else return;
+
+  // second panel
+  // if (x >= 32 && x < 64 && y >= 0 && y < 32) {
+  //   ny += 2;
+  // }
+  // printf("Incoming %dx%d - row %d, panel %d\n", x, y, row, panel);
+  if (row == 0) {
+    // don't need to do anything for top panel
+    
+  } else if (row == 1) {
+    // ny = (panelHeight * row) + ny;
+    // nx = panelX
+    
+  } else {
+    // we're on the last row
+    // figure out which we are from leftmost=0 to rightmost=2
+    // int panelIndex = 2 - (5 - panel);
+
+    // printf("Incoming %dx%d - panel %d\n", ox, y, panel);
+
+    // now figure out how much we offset by x
+    // nx = panelX * panelIndex;
+    // ny = (panelHeight * row) + ny;
+    // offset by row
+    // ny += panelHeight * row;
+    // printf("Incoming %dx%d - outgoing %dx%d - panel %d, %d\n", x, y, nx, ny, panel, panelX);
+  }
+
+  // int row, column;
+  // if (y >= 0 && y < 32) column = 0;
+  // else if (y >= 32 && y < 64) column = 1;
+  // else if (y >= 64 && y < 96) column = 2;
+  // else return;
+
+  // int nx = x;
+  // int ny = y;
+  // if (column == 2) {
+    
+  //   // outside of bounds
+  //   if (x < 0 || x >= 96) return;
+
+  //   // remap Y value to single row
+  //   ny -= 64;
+  //   // move to last 3 panels
+  //   nx += (3 * 32);
+  // printf("Incoming %dx%d, outgoing %dx%d\n", x, y, nx, ny);
+  // }
+
+  // if (column == 0) {
+  //   // outside of top row bounds
+  //   if (x < 32 || x >= 64) return;
+  //   // center top row of pixels
+  //   nx -= 32;
+  // } else if (column == 1) {
+    // // outside of middle row bounds
+    // if (x < 16 || x >= 80) return;
+    // // remap the Y value to the single row format
+    // ny -= 32;
+
+    // if (x >= 16 && x < 48) {
+    //   // middle row, left panel...
+    //   // third panel in the chain
+      
+    //   // remove border
+    //   nx -= 16;
+    //   // now offset & flip horizontally to correct position
+    //   nx = 64 + (32 - nx - 1);
+    // } else {
+    //   // don't need to do anything here,
+    //   // srcX = (48..80) - border = 32..64
+    //   // dstX = 32..64
+
+    //   // remove border
+    //   nx -= 16;
+    //   // remove first panel
+    //   nx -= 32;
+    //   // offset and flip
+    //   nx = 32 + (32 - nx - 1);
+    // }
+
+    // // flip the Y value
+    // ny = 32 - ny - 1;
+  //   // printf("Incoming %dx%d, outgoing %dx%d\n", x, y, nx, ny);
+    
+  // } else if (column == 2) {
+    // // outside of bounds
+    // if (x < 0 || x >= 96) return;
+
+    // // remap Y value to single row
+    // ny -= 64;
+    // // move to last 3 panels
+    // nx += (3 * 32);
+  // }
+
+  // offset by one for some reason
+  delegatee_->SetPixel(nx, ny, red, green, blue);
+}
+
+LumosArrangementTransformer::LumosArrangementTransformer()
+  : canvas_(new TransformCanvas()) {
+}
+
+LumosArrangementTransformer::~LumosArrangementTransformer() {
+  delete canvas_;
+}
+
+Canvas *LumosArrangementTransformer::Transform(Canvas *output) {
+  assert(output != NULL);
+
+  canvas_->SetDelegatee(output);
+  return canvas_;
+}
+
 // U-Arrangement Transformer.
 class UArrangementTransformer::TransformCanvas : public Canvas {
 public:

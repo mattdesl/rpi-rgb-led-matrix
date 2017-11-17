@@ -79,13 +79,13 @@ Framebuffer::Framebuffer(int rows, int columns, int parallel,
   assert(hardware_mapping_ != NULL);   // Called InitHardwareMapping() ?
   assert(shared_mapper_ != NULL);  // Storage should be provided by RGBMatrix.
   assert(rows_ == 8 || rows_ == 16 || rows_ == 32 || rows_ == 64);
-  if (parallel > hardware_mapping_->max_parallel_chains) {
-    fprintf(stderr, "The %s GPIO mapping only supports %d parallel chain%s, "
-            "but %d was requested.\n", hardware_mapping_->name,
-            hardware_mapping_->max_parallel_chains,
-            hardware_mapping_->max_parallel_chains > 1 ? "s" : "", parallel);
-    abort();
-  }
+  // if (parallel > hardware_mapping_->max_parallel_chains) {
+  //   fprintf(stderr, "The %s GPIO mapping only supports %d parallel chain%s, "
+  //           "but %d was requested.\n", hardware_mapping_->name,
+  //           hardware_mapping_->max_parallel_chains,
+  //           hardware_mapping_->max_parallel_chains > 1 ? "s" : "", parallel);
+  //   abort();
+  // }
   assert(parallel >= 1 && parallel <= 3);
 
   bitplane_buffer_ = new gpio_bits_t[double_rows_ * columns_ * kBitPlanes];
