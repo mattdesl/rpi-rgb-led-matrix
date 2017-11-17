@@ -289,6 +289,64 @@ public:
 };
 
 // Simple class that generates a rotating block on the screen.
+class TestView : public ThreadedCanvasManipulator {
+public:
+  ColorRGB *colorBlack = new ColorRGB(0, 0, 0);
+
+  TestView(Canvas *m) : ThreadedCanvasManipulator(m) {}
+
+  void Run () {
+    int width = 96;
+    int height = 96;
+    ColorRGB *fragColor = new ColorRGB(0, 0, 0);
+
+    canvas()->Fill(0, 0, 0);
+    printf("WidthHeight %d x %d\n", width, height);
+    for (int i = 0; i < 32; i++) {
+      int x = 32 + i;
+      int y = 0;
+      float px = x / (float)width;
+      // int v = (int)(px*255);
+      // printf("Setting %dx%d\n", x, y);
+      canvas()->SetPixel(x, y, 255, 0, 0);
+    }
+    // for (int i = 0; i < width * height; i++) {
+    //   int x = (int)(fmod((float)i, (float)width));
+    //   int y = (int)((float)i / width);
+    //   // if (y >= 0) {
+    //     canvas()->SetPixel(x, y, 255, 0, 0);
+    //   // }
+    // }
+    // while (running() && !interrupt_received) {
+    //   usleep(15 * 1000);
+      // for (int i = 0; i < width * height; i++) {
+      //   int x = (int)(fmod((float)i, (float)width));
+      //   int y = (int)((float)i / width);
+
+    //     float px = (x / (float)width);
+    //     float py = (y / (float)height);
+    //     fragColor->copy(colorBlack);
+
+    //     if (y >= 0 && y <= 32) {
+    //       fragColor->setRGBFloat(1, 0, 0);
+    //     } else if (y > 32 && y <= 64) {
+    //       fragColor->setRGBFloat(0, 1, 0);
+    //     } else if (y > 64 && y <= 96) {
+    //       fragColor->setRGBFloat(0, 0, 1);
+    //     }
+
+    //     fragColor->clampBytes();
+
+    //     // flip image before rendering
+    //     int dstX = x;
+    //     int dstY = y;
+    //     canvas()->SetPixel(dstX, dstY, fragColor->r, fragColor->g, fragColor->b);
+    //   }
+    // }
+  }
+};
+
+// Simple class that generates a rotating block on the screen.
 class SDFGen : public ThreadedCanvasManipulator {
 public:
   typedef std::chrono::high_resolution_clock clock_;
@@ -316,8 +374,8 @@ public:
   SDFGen(Canvas *m) : ThreadedCanvasManipulator(m) {}
 
   void Run () {
-    int width = canvas()->width();
-    int height = canvas()->height();
+    int width = 96;
+    int height = 96;
     ColorRGB *fragColor = new ColorRGB(0, 0, 0);
 
     noise.SetNoiseType(FastNoise::Simplex); // Set the desired noise type
@@ -485,6 +543,11 @@ int main(int argc, char *argv[]) {
   if (matrix == NULL)
     return 1;
 
+  if (matrix_options.chain_length > 3) {
+    printf("Using LUMOS arrangement...\n");
+    matrix->ApplyStaticTransformer(LumosArrangementTransformer());
+  }
+
   if (large_display) {
     // Mapping the coordinates of a 32x128 display mapped to a square of 64x64.
     // Or any other U-arrangement.
@@ -503,13 +566,7 @@ int main(int argc, char *argv[]) {
 
   // The ThreadedCanvasManipulator objects are filling
   // the matrix continuously.
-  ThreadedCanvasManipulator *image_gen = new SDFGen(canvas);
-  // switch (demo) {
-  // case 0:
-  //   // image_gen = new SDFGen(canvas);
-  //   // image_gen = new RotatingBlockGenerator(canvas);
-  //   break;
-  // }
+  ThreadedCanvasManipulator *image_gen = new TestView(canvas);
 
   if (image_gen == NULL)
     return usage(argv[0]);
