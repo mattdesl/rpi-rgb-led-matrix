@@ -6,6 +6,8 @@
     "__bit_reference": "cpp",
     "vector": "cpp",
     "ios": "cpp",
-    "cmath": "cpp"
+    "cmath": "cpp",
+    "locale": "cpp",
+    "iterator": "cpp"
   }
 }

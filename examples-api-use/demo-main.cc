@@ -38,8 +38,9 @@ using std::max;
 
 using namespace rgb_matrix;
 
-float MINTEMP = 22; // 26
+float MINTEMP = 20; // 26
 float MAXTEMP = 30; // 32
+float targetTemp = 32;
 
 int SENSOR_WIDTH = 8;
 int SENSOR_HEIGHT = 8;
@@ -217,7 +218,10 @@ void readPixels (float *buf) {
     uint16_t raw = wiringPiI2CReadReg16(i2c, AMG88xx_PIXEL_OFFSET + (i << 1));
     float converted = signedMag12ToFloat(raw) * AMG88xx_PIXEL_TEMP_CONVERSION;
     buf[i] = converted;
-	}
+    // printf("%f ", buf[i]);
+  }
+  // printf("\n");
+  
 }
 
 class Vec2 {
@@ -293,7 +297,6 @@ public:
 
   std::deque<float> movingAverages;
   float movingAverageTemp = MINTEMP;
-  float targetTemp = 30;
   float currentAverage = MINTEMP;
 
   float newAverage = MINTEMP;
@@ -405,6 +408,8 @@ public:
   Vec2 *tempVec = new Vec2(0, 0);
 
   ColorRGB *colorBlack = new ColorRGB(0, 0, 0);
+  ColorRGB *colorWhite = new ColorRGB(255, 255, 255);
+  ColorRGB *colorRed = new ColorRGB(255, 0, 0);
   ColorRGB *colorIdle0 = new ColorRGB(57, 183, 255);
   ColorRGB *colorIdle1 = new ColorRGB(94, 57, 255);
   ColorRGB *colorIdle2 = new ColorRGB(57, 243, 255); //57, 76, 255
@@ -434,6 +439,7 @@ public:
     lastTime = clock_::now();
 
     while (running() && !interrupt_received) {
+      // printf("thermistor %f\n", readThermistor());
       std::chrono::time_point<clock_> newTime = clock_::now();
       double dt = std::chrono::duration_cast<second_>(newTime - lastTime).count();
       currentTime += dt;
@@ -445,6 +451,7 @@ public:
         readPixels(sensor->temperatures);
         // update view
         sensor->update();
+        // printf("Avg temp %f\n", sensor->currentAverage);
       }
       frameTime += dt;
       if (frameTime > frameInterval) {
@@ -509,7 +516,7 @@ public:
     float zoom, speed;
 
     // mix in primary color
-    zoom = 100;
+    zoom = 100 * 2;
     speed = 35;
     float n1 = (noise.GetNoise(xCoord * zoom * aspect, yCoord * zoom, currentTime * speed) * 0.5 + 0.5);
     fragColor->lerp(colorIdle0, n1);
@@ -519,20 +526,20 @@ public:
     tempColor->lerp(colorIdle2, colorOffset);
 
     // mix in secondary color
-    zoom = 50;
+    zoom = 50 * 2;
     speed = 25 * 0.5;
     float n2 = (noise.GetNoise(xCoord * zoom * aspect, yCoord * zoom, currentTime * speed) * 0.5 + 0.5);
-    fragColor->lerp(tempColor, n2);
+    fragColor->lerp(tempColor, n2 * 0.5);
 
     // now mix in active color
     tempColor->copy(colorActive0);
     tempColor->lerp(colorActive1, n1);
 
     // apply interaction color
+    // fragColor->copy(colorBlack);
     fragColor->lerp(tempColor, interaction);
     // move toward overall warmth color
     fragColor->lerp(tempColor, sensor->getWarmthValue());
-    // fragColor->setRGBFloat(distance, distance, distance);
   }
 };
 
@@ -575,7 +582,7 @@ int main(int argc, char *argv[]) {
     printf("Could not open I2C connection...\n");
     hasI2C = false;
   }
-  writeI2C();
+  if (hasI2C) writeI2C();
 
   RGBMatrix::Options matrix_options;
   rgb_matrix::RuntimeOptions runtime_opt;
