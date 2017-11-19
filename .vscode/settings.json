@@ -8,6 +8,7 @@
     "ios": "cpp",
     "cmath": "cpp",
     "locale": "cpp",
-    "iterator": "cpp"
+    "iterator": "cpp",
+    "iostream": "cpp"
   }
 }

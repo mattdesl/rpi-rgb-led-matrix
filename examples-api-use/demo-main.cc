@@ -38,9 +38,10 @@ using std::max;
 
 using namespace rgb_matrix;
 
-float MINTEMP = 20; // 26
-float MAXTEMP = 30; // 32
-float targetTemp = 32;
+float MINTEMP = 18; // 26
+float MAXTEMP = 34; // 32
+float targetTemp = 28;
+float movingTempOffset = 2;
 
 int SENSOR_WIDTH = 8;
 int SENSOR_HEIGHT = 8;
@@ -217,7 +218,12 @@ void readPixels (float *buf) {
 	for(int i = 0; i < AMG88xx_PIXEL_ARRAY_SIZE; i++){
     uint16_t raw = wiringPiI2CReadReg16(i2c, AMG88xx_PIXEL_OFFSET + (i << 1));
     float converted = signedMag12ToFloat(raw) * AMG88xx_PIXEL_TEMP_CONVERSION;
-    buf[i] = converted;
+
+    int x = i % SENSOR_WIDTH;
+    int y = i / SENSOR_WIDTH;
+    x = SENSOR_WIDTH - x - 1;
+    int dstIndex = x + (y * SENSOR_WIDTH);
+    buf[dstIndex] = converted;
     // printf("%f ", buf[i]);
   }
   // printf("\n");
@@ -294,6 +300,8 @@ public:
 
   // tweened 8x8 temperatures
   float interpolatedTemperatures[AMG88xx_PIXEL_ARRAY_SIZE];
+  float tempBloomTemperatures[AMG88xx_PIXEL_ARRAY_SIZE];
+  float bloomedTemperatures[AMG88xx_PIXEL_ARRAY_SIZE];
 
   std::deque<float> movingAverages;
   float movingAverageTemp = MINTEMP;
@@ -301,7 +309,7 @@ public:
 
   float newAverage = MINTEMP;
   float periodTime = 30;
-  float interpolationSpeed = 0.5;
+  float interpolationSpeed = 0.1;
   int averagePeriod = (int)(periodTime * SENSOR_FPS);
   float newMovingAverageTemp = MINTEMP;
   float warmth = 0;
@@ -315,12 +323,15 @@ public:
     for (int i = 0; i < AMG88xx_PIXEL_ARRAY_SIZE; i++) {
       temperatures[i] = MINTEMP;
       interpolatedTemperatures[i] = MINTEMP;
+      tempBloomTemperatures[i] = 0;
+      bloomedTemperatures[i] = 0;
     }
   }
 
   float getValueAtPixel (int x, int y) {
-    float temp = interpolatedTemperatures[(y * SENSOR_WIDTH) + x];
-    return unlerpClamp(movingAverageTemp, targetTemp, temp);
+    return bloomedTemperatures[y * SENSOR_WIDTH + x];
+    // float temp = interpolatedTemperatures[(y * SENSOR_WIDTH) + x];
+    // return unlerpClamp(movingAverageTemp + movingTempOffset, targetTemp, temp);
   }
 
   float getWarmthValue () {
@@ -356,6 +367,37 @@ public:
     newMovingAverageTemp /= count;
   }
 
+  void blur (bool horizontal) {
+    for (int i = 0; i < AMG88xx_PIXEL_ARRAY_SIZE; i++) {
+      tempBloomTemperatures[i] = bloomedTemperatures[i];
+    }
+
+    int range = 1;
+    for (int i = 0; i < AMG88xx_PIXEL_ARRAY_SIZE; i++) {
+      int count = 0;
+      float sum = 0;
+
+      int x = i % SENSOR_WIDTH;
+      int y = i / SENSOR_WIDTH;
+
+      int lineIndex = horizontal ? x : y;
+      int minVal = max(0, lineIndex - range);
+      int maxVal = min(SENSOR_WIDTH, lineIndex + range);
+      for (int j = minVal; j <= maxVal; j++) {
+        int nx = horizontal ? j : x;
+        int ny = horizontal ? y : j;
+        sum += bloomedTemperatures[nx + (ny * SENSOR_WIDTH)];
+        count++;
+      }
+      float finalColor = count == 0 ? 0 : sum / count;
+      tempBloomTemperatures[i] = clamp(finalColor, 0, 1);
+    }
+
+    for (int i = 0; i < AMG88xx_PIXEL_ARRAY_SIZE; i++) {
+      bloomedTemperatures[i] = tempBloomTemperatures[i];
+    }
+  }
+
   void interpolate () {
     movingAverageTemp = lerp(movingAverageTemp, newMovingAverageTemp, interpolationSpeed);
     currentAverage = lerp(currentAverage, newAverage, interpolationSpeed);
@@ -364,11 +406,24 @@ public:
     for (int i = 0; i < AMG88xx_PIXEL_ARRAY_SIZE; i++) {
       float f = lerp(interpolatedTemperatures[i], temperatures[i], interpolationSpeed);
       interpolatedTemperatures[i] = f;
-      float pixelWarmth = unlerpClamp(movingAverageTemp, targetTemp, f);
+
+      float unlerpedPixel = unlerpClamp(movingAverageTemp + movingTempOffset, targetTemp, f);
+      bloomedTemperatures[i] = unlerpedPixel;
+      // int x = i % SENSOR_WIDTH;
+      // int y = i / SENSOR_WIDTH;
+      // x = SENSOR_WIDTH - x - 1;
+      // int dstIndex = x + (y * SENSOR_WIDTH);
+      
+      // get total 
+      float pixelWarmth = unlerpedPixel;
       newWarmth += pixelWarmth * warmingFactor;
     }
     newWarmth = min(1.0f, newWarmth);
     warmth = lerp(warmth, newWarmth, warmingSpeed);
+
+    // bloom the pixels a bit
+    blur(true);
+    blur(false);
   }
 };
 
@@ -451,7 +506,7 @@ public:
         readPixels(sensor->temperatures);
         // update view
         sensor->update();
-        // printf("Avg temp %f\n", sensor->currentAverage);
+        printf("Avg temp %f\n", sensor->currentAverage);
       }
       frameTime += dt;
       if (frameTime > frameInterval) {
@@ -479,7 +534,7 @@ public:
 
           // flip image before rendering
           int dstX = x;
-          int dstY = height - y - 1;
+          int dstY = y;
           if (remapPixels(dstX, dstY)) {
             canvas()->SetPixel(dstX, dstY, fragColor->r, fragColor->g, fragColor->b);
           }
@@ -538,8 +593,10 @@ public:
     // apply interaction color
     // fragColor->copy(colorBlack);
     fragColor->lerp(tempColor, interaction);
+    float v = interaction;
+    fragColor->setRGBFloat(v, v, v);
     // move toward overall warmth color
-    fragColor->lerp(tempColor, sensor->getWarmthValue());
+    // fragColor->lerp(tempColor, sensor->getWarmthValue());
   }
 };
 
