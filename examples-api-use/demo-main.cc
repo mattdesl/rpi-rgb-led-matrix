@@ -38,10 +38,13 @@ using std::max;
 
 using namespace rgb_matrix;
 
-float MINTEMP = 18; // 26
+float MINTEMP = 20; // 26
 float MAXTEMP = 34; // 32
-float targetTemp = 28;
-float movingTempOffset = 2;
+float targetTemp = 27;
+float movingTempOffset = 0.5;
+int blurRange = 2;
+float interpolationSpeed = 0.5;
+float bloomBurst = 2;
 
 int SENSOR_WIDTH = 8;
 int SENSOR_HEIGHT = 8;
@@ -177,21 +180,34 @@ float unlerpClamp (float minVal, float maxVal, float value) {
   return unlerp(minVal, maxVal, clamp(value, minVal, maxVal));
 }
 
-void writeI2C () {
+bool writeI2C () {
   try {
     // enter normal mode
-    if (wiringPiI2CWriteReg8(i2c, AMG88xx_PCTL, (unsigned int)0) < 0) printf("error 1\n");
+    if (wiringPiI2CWriteReg8(i2c, AMG88xx_PCTL, (unsigned int)0) < 0) {
+      printf("Error entering normal mode on I2C\n");
+      return false;
+    }
     // initial reset
     int initialReset = AMG88xx_INITIAL_RESET & ((1 << 8) - 1);
-    if (wiringPiI2CWriteReg8(i2c, AMG88xx_RST, (unsigned int)(initialReset)) < 0) printf("error 2\n");
+    if (wiringPiI2CWriteReg8(i2c, AMG88xx_RST, (unsigned int)(initialReset)) < 0) {
+      printf("Error sending initial reset on I2C\n");
+      return false;
+    }
     // disable interrupt mode
-    if (wiringPiI2CWriteReg8(i2c, AMG88xx_INTC, (unsigned int)0) < 0) printf("error 3\n");
+    if (wiringPiI2CWriteReg8(i2c, AMG88xx_INTC, (unsigned int)0) < 0) {
+      printf("Error disabling interrupt mode on I2C\n");
+      return false;
+    }
     // set FPS to 10
-    if (wiringPiI2CWriteReg8(i2c, AMG88xx_FPSC, (unsigned int)0) < 0) printf("error 4\n");
+    if (wiringPiI2CWriteReg8(i2c, AMG88xx_FPSC, (unsigned int)0) < 0) {
+      printf("Error setting FPS on I2C\n");
+      return false;
+    }
   } catch (const std::exception& err) {
     printf("Could not open I2C connection...\n");
-    hasI2C = false;
+    return false;
   }
+  return true;
 }
 
 float signedMag12ToFloat(uint16_t val) {
@@ -309,7 +325,6 @@ public:
 
   float newAverage = MINTEMP;
   float periodTime = 30;
-  float interpolationSpeed = 0.1;
   int averagePeriod = (int)(periodTime * SENSOR_FPS);
   float newMovingAverageTemp = MINTEMP;
   float warmth = 0;
@@ -367,12 +382,11 @@ public:
     newMovingAverageTemp /= count;
   }
 
-  void blur (bool horizontal) {
+  void blur (bool horizontal, int range) {
     for (int i = 0; i < AMG88xx_PIXEL_ARRAY_SIZE; i++) {
       tempBloomTemperatures[i] = bloomedTemperatures[i];
     }
 
-    int range = 1;
     for (int i = 0; i < AMG88xx_PIXEL_ARRAY_SIZE; i++) {
       int count = 0;
       float sum = 0;
@@ -382,11 +396,11 @@ public:
 
       int lineIndex = horizontal ? x : y;
       int minVal = max(0, lineIndex - range);
-      int maxVal = min(SENSOR_WIDTH, lineIndex + range);
+      int maxVal = min(SENSOR_WIDTH - 1, lineIndex + range);
       for (int j = minVal; j <= maxVal; j++) {
         int nx = horizontal ? j : x;
         int ny = horizontal ? y : j;
-        sum += bloomedTemperatures[nx + (ny * SENSOR_WIDTH)];
+        sum += bloomedTemperatures[nx + (ny * SENSOR_WIDTH)] * bloomBurst;
         count++;
       }
       float finalColor = count == 0 ? 0 : sum / count;
@@ -422,8 +436,10 @@ public:
     warmth = lerp(warmth, newWarmth, warmingSpeed);
 
     // bloom the pixels a bit
-    blur(true);
-    blur(false);
+    if (blurRange > 0) {
+      blur(true, blurRange);
+      blur(false, blurRange);
+    }
   }
 };
 
@@ -469,7 +485,7 @@ public:
   ColorRGB *colorIdle1 = new ColorRGB(94, 57, 255);
   ColorRGB *colorIdle2 = new ColorRGB(57, 243, 255); //57, 76, 255
   ColorRGB *colorActive0 = new ColorRGB(255, 0, 0);
-  ColorRGB *colorActive1 = new ColorRGB(249, 106, 10);
+  ColorRGB *colorActive1 = new ColorRGB(249, 145, 10);
   ColorRGB *tempColor = new ColorRGB(0, 0, 0);
 
   double currentTime = 0.0;
@@ -513,7 +529,7 @@ public:
         frameTime = 0.0;
         // usleep(15 * 1000);
         // interpolate toward the new rolling averages
-        sensor->interpolate();
+        if (hasI2C) sensor->interpolate();
         // printf("temp %f\n", newAverage);
 
         for (int i = 0; i < width * height; i++) {
@@ -561,7 +577,7 @@ public:
 
     int srcX = ((x * xRatio) >> 16);
     int srcY = ((y * yRatio) >> 16);
-    float interaction = sensor->getValueAtPixel(srcX, srcY);
+    float interaction = hasI2C ? sensor->getValueAtPixel(srcX, srcY) : 0;
 
     float colorOffset = sinf(currentTime * 0.25) * 0.5 + 0.5;
 
@@ -592,11 +608,13 @@ public:
 
     // apply interaction color
     // fragColor->copy(colorBlack);
-    fragColor->lerp(tempColor, interaction);
-    float v = interaction;
-    fragColor->setRGBFloat(v, v, v);
-    // move toward overall warmth color
-    // fragColor->lerp(tempColor, sensor->getWarmthValue());
+    if (hasI2C) {
+      fragColor->lerp(tempColor, interaction);
+      // float v = interaction;
+      // fragColor->setRGBFloat(v, v, v);
+      // move toward overall warmth color
+      fragColor->lerp(tempColor, sensor->getWarmthValue());
+    }
   }
 };
 
@@ -639,7 +657,7 @@ int main(int argc, char *argv[]) {
     printf("Could not open I2C connection...\n");
     hasI2C = false;
   }
-  if (hasI2C) writeI2C();
+  if (hasI2C) hasI2C = writeI2C();
 
   RGBMatrix::Options matrix_options;
   rgb_matrix::RuntimeOptions runtime_opt;
