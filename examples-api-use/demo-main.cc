@@ -40,11 +40,14 @@ using namespace rgb_matrix;
 
 float MINTEMP = 20; // 26
 float MAXTEMP = 34; // 32
+float CLEAN_RANGE_MIN = -20;
+float CLEAN_RANGE_MAX = 80;
 float targetTemp = 27;
 float movingTempOffset = 0.5;
 int blurRange = 2;
 float interpolationSpeed = 0.5;
 float bloomBurst = 2;
+bool isI2CValid = true;
 
 int SENSOR_WIDTH = 8;
 int SENSOR_HEIGHT = 8;
@@ -522,7 +525,7 @@ public:
         readPixels(sensor->temperatures);
         // update view
         sensor->update();
-        printf("Avg temp %f\n", sensor->currentAverage);
+        // printf("Avg temp %f\n", sensor->currentAverage);
       }
       frameTime += dt;
       if (frameTime > frameInterval) {
@@ -531,6 +534,11 @@ public:
         // interpolate toward the new rolling averages
         if (hasI2C) sensor->interpolate();
         // printf("temp %f\n", newAverage);
+
+        float avg = sensor->currentAverage;
+        bool isClean = avg >= CLEAN_RANGE_MIN && avg <= CLEAN_RANGE_MAX;
+        // once we exit a clean state, expect it to always be dirty
+        if (isI2CValid && !isClean) isI2CValid = false;
 
         for (int i = 0; i < width * height; i++) {
           int x = (int)(fmod((float)i, (float)width));
@@ -577,7 +585,7 @@ public:
 
     int srcX = ((x * xRatio) >> 16);
     int srcY = ((y * yRatio) >> 16);
-    float interaction = hasI2C ? sensor->getValueAtPixel(srcX, srcY) : 0;
+    float interaction = (isI2CValid && hasI2C) ? sensor->getValueAtPixel(srcX, srcY) : 0;
 
     float colorOffset = sinf(currentTime * 0.25) * 0.5 + 0.5;
 
@@ -608,7 +616,7 @@ public:
 
     // apply interaction color
     // fragColor->copy(colorBlack);
-    if (hasI2C) {
+    if (isI2CValid && hasI2C) {
       fragColor->lerp(tempColor, interaction);
       // float v = interaction;
       // fragColor->setRGBFloat(v, v, v);
