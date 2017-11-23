@@ -106,7 +106,7 @@ HARDWARE_DESC?=adafruit-hat-pwm
 # close together.
 # Then you can set the flag --led-gpio-mapping=adafruit-hat-pwm
 # .. or uncomment the following line.
-#HARDWARE_DESC=adafruit-hat-pwm
+HARDWARE_DESC=adafruit-hat-pwm
 
 # Typically, a Hub75 panel is split in two half displays, so that a 1:16
 # multiplexing actually multiplexes over two half displays and gives 32 lines.
@@ -119,7 +119,7 @@ HARDWARE_DESC?=adafruit-hat-pwm
 
 # Experimental: Disable realtime throttling of the Linux kernel. Uncomment
 # if you see periodic flickering in particular with longer display chains.
-#DEFINES+=-DDISABLE_RT_THROTTLE
+DEFINES+=-DDISABLE_RT_THROTTLE
 
 # If someone gives additional values on the make commandline e.g.
 # make USER_DEFINES="-DSHOW_REFRESH_RATE"

@@ -308,7 +308,6 @@ public:
 		r += (color->r - r) * alpha;
 		g += (color->g - g) * alpha;
     b += (color->b - b) * alpha;
-    clampBytes();
   }
 };
 
@@ -493,6 +492,7 @@ public:
 
   ColorRGB *colorActive0 = new ColorRGB(255, 0, 0);
   ColorRGB *colorActive1 = new ColorRGB(249, 145, 10);
+  ColorRGB *baseColor = new ColorRGB(0, 0, 0);
   ColorRGB *tempColor = new ColorRGB(0, 0, 0);
 
   double currentTime = 0.0;
@@ -544,26 +544,29 @@ public:
         // once we exit a clean state, expect it to always be dirty
         if (isI2CValid && !isClean) isI2CValid = false;
 
+        float colorOffset = sinf(currentTime * 0.25) * 0.5 + 0.5;
+        // choose secondary color based on slowly rotating offset
+        baseColor->copy(colorIdle1);
+        baseColor->lerp(colorIdle2, colorOffset);
+
+        // slowly rotate to a more dramatic secondary color
+        float coloroffset2 = sinf(currentTime * 0.1) * 0.5 + 0.5;
+        baseColor->lerp(colorDrama0, coloroffset2);
+
         for (int i = 0; i < width * height; i++) {
-          int x = (int)(fmod((float)i, (float)width));
-          int y = (int)((float)i / width);
+          int x = i % width;
+          int y = i / width;
 
-          // flip horizontally
-          // x = width - x - 1;
-
-          // int y = i / width;
-          // int x = i - width * y;
-          // float radius = 0.5 + 0.5 * (noise.GetNoise(px * 100, py * 100, tick) * 0.5 + 0.5);
           float px = (x / (float)width);
           float py = (y / (float)height);
-          fragColor->copy(colorBlack);
-          pixelShader(fragColor, x, y, px, py, (float)width, (float)height, i);
-          fragColor->clampBytes();
 
           // flip image before rendering
           int dstX = x;
           int dstY = y;
           if (remapPixels(dstX, dstY)) {
+            fragColor->copy(colorBlack);
+            pixelShader(fragColor, x, y, px, py, (float)width, (float)height, i);
+            fragColor->clampBytes();
             canvas()->SetPixel(dstX, dstY, fragColor->r, fragColor->g, fragColor->b);
           }
         }
@@ -591,25 +594,16 @@ public:
     int srcY = ((y * yRatio) >> 16);
     float interaction = (isI2CValid && hasI2C) ? sensor->getValueAtPixel(srcX, srcY) : 0;
 
-    float colorOffset = sinf(currentTime * 0.25) * 0.5 + 0.5;
-
-    // initial color (no light)
-    fragColor->copy(colorBlack);
 
     float zoom, speed;
 
-    // choose secondary color based on slowly rotating offset
-    tempColor->copy(colorIdle1);
-    tempColor->lerp(colorIdle2, colorOffset);
 
-    // slowly rotate to a more dramatic secondary color
-    float coloroffset2 = sinf(currentTime * 0.1) * 0.5 + 0.5;
-    tempColor->lerp(colorDrama0, coloroffset2);
 
     // mix secondary with primary using noise
     zoom = 40 * 2;
     speed = 25 * 0.5;
     float n2 = (noise.GetNoise(xCoord * zoom * aspect, yCoord * zoom, currentTime * speed) * 0.5 + 0.5);
+    tempColor->copy(baseColor);
     tempColor->lerp(colorIdle0, n2);
 
     // mix color in with noise
@@ -617,7 +611,6 @@ public:
     speed = 35;
     float n1 = (noise.GetNoise(xCoord * zoom * aspect, yCoord * zoom, currentTime * speed) * 0.5 + 0.5);
     fragColor->lerp(tempColor, n1);
-
 
     // apply interaction color
     // fragColor->copy(colorBlack);
