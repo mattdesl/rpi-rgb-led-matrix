@@ -14,6 +14,9 @@
     "algorithm": "cpp",
     "limits": "cpp",
     "ios": "cpp",
-    "deque": "cpp"
+    "deque": "cpp",
+    "__functional_base": "cpp",
+    "istream": "cpp",
+    "tuple": "cpp"
   }
 }

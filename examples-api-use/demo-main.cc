@@ -484,9 +484,13 @@ public:
   ColorRGB *colorBlack = new ColorRGB(0, 0, 0);
   ColorRGB *colorWhite = new ColorRGB(255, 255, 255);
   ColorRGB *colorRed = new ColorRGB(255, 0, 0);
+
   ColorRGB *colorIdle0 = new ColorRGB(57, 183, 255);
   ColorRGB *colorIdle1 = new ColorRGB(94, 57, 255);
   ColorRGB *colorIdle2 = new ColorRGB(57, 243, 255); //57, 76, 255
+
+  ColorRGB *colorDrama0 = new ColorRGB(149, 2, 247);
+
   ColorRGB *colorActive0 = new ColorRGB(255, 0, 0);
   ColorRGB *colorActive1 = new ColorRGB(249, 145, 10);
   ColorRGB *tempColor = new ColorRGB(0, 0, 0);
@@ -594,29 +598,34 @@ public:
 
     float zoom, speed;
 
-    // mix in primary color
-    zoom = 100 * 2;
-    speed = 35;
-    float n1 = (noise.GetNoise(xCoord * zoom * aspect, yCoord * zoom, currentTime * speed) * 0.5 + 0.5);
-    fragColor->lerp(colorIdle0, n1);
-
     // choose secondary color based on slowly rotating offset
     tempColor->copy(colorIdle1);
     tempColor->lerp(colorIdle2, colorOffset);
 
-    // mix in secondary color
-    zoom = 50 * 2;
+    // slowly rotate to a more dramatic secondary color
+    float coloroffset2 = sinf(currentTime * 0.1) * 0.5 + 0.5;
+    tempColor->lerp(colorDrama0, coloroffset2);
+
+    // mix secondary with primary using noise
+    zoom = 40 * 2;
     speed = 25 * 0.5;
     float n2 = (noise.GetNoise(xCoord * zoom * aspect, yCoord * zoom, currentTime * speed) * 0.5 + 0.5);
-    fragColor->lerp(tempColor, n2 * 0.5);
+    tempColor->lerp(colorIdle0, n2);
 
-    // now mix in active color
-    tempColor->copy(colorActive0);
-    tempColor->lerp(colorActive1, n1);
+    // mix color in with noise
+    zoom = 70 * 2;
+    speed = 35;
+    float n1 = (noise.GetNoise(xCoord * zoom * aspect, yCoord * zoom, currentTime * speed) * 0.5 + 0.5);
+    fragColor->lerp(tempColor, n1);
+
 
     // apply interaction color
     // fragColor->copy(colorBlack);
     if (isI2CValid && hasI2C) {
+      // now mix in active color
+      tempColor->copy(colorActive0);
+      tempColor->lerp(colorActive1, n1);
+
       fragColor->lerp(tempColor, interaction);
       // float v = interaction;
       // fragColor->setRGBFloat(v, v, v);
@@ -672,7 +681,7 @@ int main(int argc, char *argv[]) {
 
   // These are the defaults when no command-line flags are given.
   matrix_options.rows = 32;
-  matrix_options.chain_length = 1;
+  matrix_options.chain_length = 6;
   matrix_options.parallel = 1;
 
   // First things first: extract the command line flags that contain
