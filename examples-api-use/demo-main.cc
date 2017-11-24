@@ -236,9 +236,9 @@ void readPixels (float *buf) {
 	// uint8_t rawArray[bytesToRead];
 	// this->read(AMG88xx_PIXEL_OFFSET, rawArray, bytesToRead);
 	bool isInvalid = false;
-  float avg = 0;
+  // float avg = 0;
   // printf("thermistor: %f   ", readThermistor());
-  float thermistor = readThermistor();
+  float thermistor = abs(readThermistor()) / 2.0;
   
 	for(int i = 0; i < AMG88xx_PIXEL_ARRAY_SIZE; i++){
     int x = i % SENSOR_WIDTH;
@@ -250,10 +250,10 @@ void readPixels (float *buf) {
     float converted = signedMag12ToFloat(raw) * AMG88xx_PIXEL_TEMP_CONVERSION;
     if (converted >= CLEAN_RANGE_MAX || converted <= CLEAN_RANGE_MIN) {
       isInvalid = true;
-      converted = thermistor / 2;
       // printf("I2C is invalid %f\n", converted);
+      converted = thermistor;
     }
-    avg += converted;
+    // avg += converted;
     // converted = clamp(converted, -minReadTemp, maxReadTemp);
     
     // x = SENSOR_WIDTH - x - 1;
@@ -265,7 +265,7 @@ void readPixels (float *buf) {
     buf[i] = converted;
     // printf("%f ", buf[i]);
   }
-  avg /= (float)AMG88xx_PIXEL_ARRAY_SIZE;
+  // avg /= (float)AMG88xx_PIXEL_ARRAY_SIZE;
   // printf("thermister: %f, pixel average: %f\n", readThermistor(), avg);
 
   // once we exit a clean state, expect it to always be dirty
@@ -545,7 +545,7 @@ public:
     lastTime = clock_::now();
 
     while (running() && !interrupt_received) {
-      printf("thermistor %f, current average %f, moving average %f\n", readThermistor(), sensor->currentAverage, sensor->movingAverageTemp + movingTempOffset);
+      // printf("thermistor %f, current average %f, moving average %f\n", readThermistor(), sensor->currentAverage, sensor->movingAverageTemp + movingTempOffset);
       std::chrono::time_point<clock_> newTime = clock_::now();
       double dt = std::chrono::duration_cast<second_>(newTime - lastTime).count();
       currentTime += dt;
