@@ -528,6 +528,8 @@ public:
   double sensorInterval = 1.0 / RENDER_FPS;
   double frameTime = 0.0;
   double frameInterval = 1.0 / 30;
+  double resetInterval = 30;
+  double resetTime = 0;
 
   FastNoise noise; // Create a FastNoise object
   TemperatureView *sensor = new TemperatureView();
@@ -558,6 +560,14 @@ public:
         // update view
         sensor->update();
         // printf("Avg temp %f\n", sensor->currentAverage);
+      }
+      resetTime += dt;
+      if (resetTime > resetInterval) {
+        resetTime = 0;
+        // if (hasI2C) {
+        hasI2C = writeI2C();
+        printf("Reset %d\n", hasI2C);
+        // }
       }
       frameTime += dt;
       if (frameTime > frameInterval) {
