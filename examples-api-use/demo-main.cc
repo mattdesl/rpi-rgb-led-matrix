@@ -40,14 +40,17 @@ using namespace rgb_matrix;
 
 float MINTEMP = 20; // 26
 float MAXTEMP = 34; // 32
-float CLEAN_RANGE_MIN = -20;
-float CLEAN_RANGE_MAX = 80;
-float targetTemp = 27;
-float movingTempOffset = 0.5;
+float CLEAN_RANGE_MIN = -60;
+float CLEAN_RANGE_MAX = 250;
+float minReadTemp = -10;
+float maxReadTemp = 40;
+float targetTempOffset = 6;
+float movingTempOffset = 1.5;
 int blurRange = 2;
 float interpolationSpeed = 0.5;
 float bloomBurst = 2;
 bool isI2CValid = true;
+bool hasI2C = true;
 
 int SENSOR_WIDTH = 8;
 int SENSOR_HEIGHT = 8;
@@ -66,7 +69,6 @@ float SENSOR_FPS = 10;
 float RENDER_FPS = 30;
 
 int i2c;
-bool hasI2C = true;
 
 #define LED_PANEL_SIZE 32
 #define LED_PANEL_COUNT 6
@@ -233,17 +235,43 @@ void readPixels (float *buf) {
 	// uint8_t bytesToRead = min(size << 1, AMG88xx_PIXEL_ARRAY_SIZE << 1);
 	// uint8_t rawArray[bytesToRead];
 	// this->read(AMG88xx_PIXEL_OFFSET, rawArray, bytesToRead);
-	
+	bool isInvalid = false;
+  float avg = 0;
+  // printf("thermistor: %f   ", readThermistor());
+  float thermistor = readThermistor();
+  
 	for(int i = 0; i < AMG88xx_PIXEL_ARRAY_SIZE; i++){
-    uint16_t raw = wiringPiI2CReadReg16(i2c, AMG88xx_PIXEL_OFFSET + (i << 1));
-    float converted = signedMag12ToFloat(raw) * AMG88xx_PIXEL_TEMP_CONVERSION;
-
     int x = i % SENSOR_WIDTH;
     int y = i / SENSOR_WIDTH;
-    x = SENSOR_WIDTH - x - 1;
-    int dstIndex = x + (y * SENSOR_WIDTH);
-    buf[dstIndex] = converted;
+    // int srcIndex = i;
+    y = SENSOR_HEIGHT - y - 1;
+    int srcIndex = (SENSOR_HEIGHT - x - 1) * SENSOR_WIDTH + y;
+    uint16_t raw = wiringPiI2CReadReg16(i2c, AMG88xx_PIXEL_OFFSET + (srcIndex << 1));
+    float converted = signedMag12ToFloat(raw) * AMG88xx_PIXEL_TEMP_CONVERSION;
+    if (converted >= CLEAN_RANGE_MAX || converted <= CLEAN_RANGE_MIN) {
+      isInvalid = true;
+      converted = thermistor / 2;
+      // printf("I2C is invalid %f\n", converted);
+    }
+    avg += converted;
+    // converted = clamp(converted, -minReadTemp, maxReadTemp);
+    
+    // x = SENSOR_WIDTH - x - 1;
+    // y = SENSOR_HEIGHT - y - 1;
+    // int dstIndex = x + (y * SENSOR_WIDTH);
+
+// data[];
+
+    buf[i] = converted;
     // printf("%f ", buf[i]);
+  }
+  avg /= (float)AMG88xx_PIXEL_ARRAY_SIZE;
+  // printf("thermister: %f, pixel average: %f\n", readThermistor(), avg);
+
+  // once we exit a clean state, expect it to always be dirty
+  if (isI2CValid && isInvalid) {
+    // printf("I2C is no longer valid!\n");
+    // isI2CValid = false;
   }
   // printf("\n");
   
@@ -423,7 +451,7 @@ public:
       float f = lerp(interpolatedTemperatures[i], temperatures[i], interpolationSpeed);
       interpolatedTemperatures[i] = f;
 
-      float unlerpedPixel = unlerpClamp(movingAverageTemp + movingTempOffset, targetTemp, f);
+      float unlerpedPixel = unlerpClamp(movingAverageTemp + movingTempOffset, movingAverageTemp + movingTempOffset + targetTempOffset, f);
       bloomedTemperatures[i] = unlerpedPixel;
       // int x = i % SENSOR_WIDTH;
       // int y = i / SENSOR_WIDTH;
@@ -488,7 +516,7 @@ public:
   ColorRGB *colorIdle1 = new ColorRGB(94, 57, 255);
   ColorRGB *colorIdle2 = new ColorRGB(57, 243, 255); //57, 76, 255
 
-  ColorRGB *colorDrama0 = new ColorRGB(149, 2, 247);
+  ColorRGB *colorDrama0 = new ColorRGB(34, 1, 247);
 
   ColorRGB *colorActive0 = new ColorRGB(255, 0, 0);
   ColorRGB *colorActive1 = new ColorRGB(249, 145, 10);
@@ -517,7 +545,7 @@ public:
     lastTime = clock_::now();
 
     while (running() && !interrupt_received) {
-      // printf("thermistor %f\n", readThermistor());
+      printf("thermistor %f, current average %f, moving average %f\n", readThermistor(), sensor->currentAverage, sensor->movingAverageTemp + movingTempOffset);
       std::chrono::time_point<clock_> newTime = clock_::now();
       double dt = std::chrono::duration_cast<second_>(newTime - lastTime).count();
       currentTime += dt;
@@ -538,11 +566,6 @@ public:
         // interpolate toward the new rolling averages
         if (hasI2C) sensor->interpolate();
         // printf("temp %f\n", newAverage);
-
-        float avg = sensor->currentAverage;
-        bool isClean = avg >= CLEAN_RANGE_MIN && avg <= CLEAN_RANGE_MAX;
-        // once we exit a clean state, expect it to always be dirty
-        if (isI2CValid && !isClean) isI2CValid = false;
 
         float colorOffset = sinf(currentTime * 0.25) * 0.5 + 0.5;
         // choose secondary color based on slowly rotating offset
@@ -597,8 +620,6 @@ public:
 
     float zoom, speed;
 
-
-
     // mix secondary with primary using noise
     zoom = 40 * 2;
     speed = 25 * 0.5;
@@ -624,6 +645,7 @@ public:
       // fragColor->setRGBFloat(v, v, v);
       // move toward overall warmth color
       fragColor->lerp(tempColor, sensor->getWarmthValue());
+      // fragColor->setRGBFloat(interaction, interaction, interaction);
     }
   }
 };
@@ -657,15 +679,17 @@ int main(int argc, char *argv[]) {
   bool large_display = false;
 
   printf("Opening i2C connection...\n");
-  wiringPiSetup();
-  try {
-    if ((i2c = wiringPiI2CSetup(AMG88xx_I2CADD)) < 0) {
-      printf("Error opening I2C channel...\n");
+  if (hasI2C) {
+    wiringPiSetup();
+    try {
+      if ((i2c = wiringPiI2CSetup(AMG88xx_I2CADD)) < 0) {
+        printf("Error opening I2C channel...\n");
+        hasI2C = false;
+      }
+    } catch (const std::exception& err) {
+      printf("Could not open I2C connection...\n");
       hasI2C = false;
     }
-  } catch (const std::exception& err) {
-    printf("Could not open I2C connection...\n");
-    hasI2C = false;
   }
   if (hasI2C) hasI2C = writeI2C();
 
@@ -736,6 +760,10 @@ int main(int argc, char *argv[]) {
     while (!interrupt_received) {
       sleep(1); // Time doesn't really matter. The syscall will be interrupted.
     }
+  }
+
+  if (hasI2C) {
+    // wiringPi2CClose(i2c);
   }
 
   // Stop image generating thread. The delete triggers

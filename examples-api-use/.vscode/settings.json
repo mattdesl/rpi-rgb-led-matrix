@@ -17,6 +17,8 @@
     "deque": "cpp",
     "__functional_base": "cpp",
     "istream": "cpp",
-    "tuple": "cpp"
+    "tuple": "cpp",
+    "__split_buffer": "cpp",
+    "exception": "cpp"
   }
 }
