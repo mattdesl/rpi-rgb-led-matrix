@@ -528,7 +528,7 @@ public:
   double sensorInterval = 1.0 / RENDER_FPS;
   double frameTime = 0.0;
   double frameInterval = 1.0 / 30;
-  double resetInterval = 30;
+  double resetInterval = 60 * 2;
   double resetTime = 0;
 
   FastNoise noise; // Create a FastNoise object
@@ -553,14 +553,7 @@ public:
       currentTime += dt;
       lastTime = newTime;
       sensorTime += dt;
-      if (hasI2C && sensorTime > sensorInterval) {
-        sensorTime = 0.0;
-        // read into temperatures
-        readPixels(sensor->temperatures);
-        // update view
-        sensor->update();
-        // printf("Avg temp %f\n", sensor->currentAverage);
-      }
+
       resetTime += dt;
       if (resetTime > resetInterval) {
         resetTime = 0;
@@ -568,6 +561,14 @@ public:
         hasI2C = writeI2C();
         printf("Reset %d\n", hasI2C);
         // }
+      }
+      if (hasI2C && sensorTime > sensorInterval) {
+        sensorTime = 0.0;
+        // read into temperatures
+        readPixels(sensor->temperatures);
+        // update view
+        sensor->update();
+        // printf("Avg temp %f\n", sensor->currentAverage);
       }
       frameTime += dt;
       if (frameTime > frameInterval) {
