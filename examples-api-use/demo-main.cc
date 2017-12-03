@@ -51,6 +51,9 @@ float interpolationSpeed = 0.5;
 float bloomBurst = 2;
 bool isI2CValid = true;
 bool hasI2C = true;
+bool sensorReady = false;
+float sensorStartDelay = 3;
+float sensorStartTime = 0;
 
 int SENSOR_WIDTH = 8;
 int SENSOR_HEIGHT = 8;
@@ -519,7 +522,7 @@ public:
   double sensorInterval = 1.0 / RENDER_FPS;
   double frameTime = 0.0;
   double frameInterval = 1.0 / 30;
-  double resetInterval = 60 * 2;
+  double resetInterval = 60 * 1;
   double resetTime = 0;
 
   FastNoise noise; // Create a FastNoise object
@@ -545,15 +548,27 @@ public:
       lastTime = newTime;
       sensorTime += dt;
 
+      if (!sensorReady) {
+        sensorStartTime += dt;
+        if (sensorStartTime > sensorStartDelay) {
+          // allow I2C and I2C resets
+          sensorReady = true;
+          printf("Sensor ready.\n");
+
+          // also reset I2C at this time
+          resetTime = 0;
+          hasI2C = writeI2C();
+          printf("Initial Reset %d\n", hasI2C);
+        }
+      }
+
       resetTime += dt;
-      if (resetTime > resetInterval) {
+      if (sensorReady && resetTime > resetInterval) {
         resetTime = 0;
-        // if (hasI2C) {
         hasI2C = writeI2C();
         printf("Reset %d\n", hasI2C);
-        // }
       }
-      if (hasI2C && sensorTime > sensorInterval) {
+      if (sensorReady && hasI2C && sensorTime > sensorInterval) {
         sensorTime = 0.0;
         // read into temperatures
         readPixels(sensor->temperatures);
@@ -629,7 +644,7 @@ public:
 
     // apply interaction color
     // fragColor->copy(colorBlack);
-    if (isI2CValid && hasI2C) {
+    if (sensorReady && isI2CValid && hasI2C) {
       // now mix in active color
       tempColor->copy(colorActive0);
       tempColor->lerp(colorActive1, n1);
@@ -685,7 +700,7 @@ int main(int argc, char *argv[]) {
       hasI2C = false;
     }
   }
-  if (hasI2C) hasI2C = writeI2C();
+  // if (hasI2C) hasI2C = writeI2C();
 
   RGBMatrix::Options matrix_options;
   rgb_matrix::RuntimeOptions runtime_opt;
