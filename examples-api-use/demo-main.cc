@@ -77,10 +77,6 @@ int i2c;
 #define LED_PIXEL_COUNT LED_PIXELS_WIDTH * LED_PIXELS_HEIGHT
 #define LED_OUTPUT_WIDTH LED_PANEL_COUNT * LED_PANEL_SIZE
 
-int pixelLookupX[LED_PIXEL_COUNT];
-int pixelLookupY[LED_PIXEL_COUNT];
-bool usePixelLookup = false;
-
 bool remapPixels (int& x, int& y) {
   int width = LED_PIXELS_WIDTH;
   int height = LED_PIXELS_HEIGHT;
@@ -144,11 +140,6 @@ bool remapPixels (int& x, int& y) {
   x = nx;
   y = ny;
   return true;
-}
-
-void generatePixelLookup () {
-  printf("Total pixels: %d\n", LED_PIXEL_COUNT);
-  usePixelLookup = true;
 }
 
 volatile bool interrupt_received = false;
@@ -473,32 +464,32 @@ public:
   }
 };
 
-// Simple class that generates a rotating block on the screen.
-class TestView : public ThreadedCanvasManipulator {
-public:
-  ColorRGB *colorBlack = new ColorRGB(0, 0, 0);
+// // Simple class that generates a rotating block on the screen.
+// class TestView : public ThreadedCanvasManipulator {
+// public:
+//   ColorRGB *colorBlack = new ColorRGB(0, 0, 0);
 
-  TestView(Canvas *m) : ThreadedCanvasManipulator(m) {}
+//   TestView(Canvas *m) : ThreadedCanvasManipulator(m) {}
 
-  void Run () {
-    int width = 96;
-    int height = 96;
-    ColorRGB *fragColor = new ColorRGB(0, 0, 0);
+//   void Run () {
+//     int width = 96;
+//     int height = 96;
+//     ColorRGB *fragColor = new ColorRGB(0, 0, 0);
 
-    canvas()->Fill(0, 0, 0);
-    printf("WidthHeight %d x %d\n", width, height);
-    for (int i = 0; i < 96; i++) {
-      int x = i;
-      int y = 33;
-      float px = x / (float)width;
-      int v = (int)(px*255);
-      // printf("Setting %dx%d\n", x, y);
-      if (remapPixels(x, y)) {
-        canvas()->SetPixel(x, y, v, 0, 0);
-      }
-    }
-  }
-};
+//     canvas()->Fill(0, 0, 0);
+//     printf("WidthHeight %d x %d\n", width, height);
+//     for (int i = 0; i < 96; i++) {
+//       int x = i;
+//       int y = 33;
+//       float px = x / (float)width;
+//       int v = (int)(px*255);
+//       // printf("Setting %dx%d\n", x, y);
+//       if (remapPixels(x, y)) {
+//         canvas()->SetPixel(x, y, v, 0, 0);
+//       }
+//     }
+//   }
+// };
 
 // Simple class that generates a rotating block on the screen.
 class SDFGen : public ThreadedCanvasManipulator {
@@ -513,10 +504,10 @@ public:
   ColorRGB *colorRed = new ColorRGB(255, 0, 0);
 
   ColorRGB *colorIdle0 = new ColorRGB(57, 183, 255);
-  ColorRGB *colorIdle1 = new ColorRGB(94, 57, 255);
-  ColorRGB *colorIdle2 = new ColorRGB(57, 243, 255); //57, 76, 255
+  ColorRGB *colorIdle1 = new ColorRGB(30, 255, 195);
+  ColorRGB *colorIdle2 = new ColorRGB(62, 50, 239); //57, 76, 255
 
-  ColorRGB *colorDrama0 = new ColorRGB(34, 1, 247);
+  ColorRGB *colorDrama0 = new ColorRGB(70, 22, 244);//34, 1, 247
 
   ColorRGB *colorActive0 = new ColorRGB(255, 0, 0);
   ColorRGB *colorActive1 = new ColorRGB(249, 145, 10);
@@ -585,6 +576,7 @@ public:
 
         // slowly rotate to a more dramatic secondary color
         float coloroffset2 = sinf(currentTime * 0.1) * 0.5 + 0.5;
+        coloroffset2 = smoothstep(0.0, 0.1, coloroffset2);
         baseColor->lerp(colorDrama0, coloroffset2);
 
         for (int i = 0; i < width * height; i++) {
@@ -604,16 +596,6 @@ public:
             canvas()->SetPixel(dstX, dstY, fragColor->r, fragColor->g, fragColor->b);
           }
         }
-        // float cols = 8;
-        // float rows = 8;
-        // for (int i = 0; i < cols * rows; i++) {
-        //   int x = (int)(fmod((float)i, (float)cols));
-        //   int y = (int)((float)i / cols);
-        //   float temperature = interpolatedTemperatures[i];
-        //   float v = unlerpClamp(movingAverageTemp, targetTemp, temperature);
-        //   fragColor->setRGBFloat(v, v, v);
-        //   canvas()->SetPixel(x, y, fragColor->r, fragColor->g, fragColor->b);
-        // }
       }
     }
   }
@@ -642,6 +624,7 @@ public:
     zoom = 70 * 2;
     speed = 35;
     float n1 = (noise.GetNoise(xCoord * zoom * aspect, yCoord * zoom, currentTime * speed) * 0.5 + 0.5);
+    n1 = clamp(powf(n1, 1.5), 0, 1);
     fragColor->lerp(tempColor, n1);
 
     // apply interaction color
@@ -724,7 +707,6 @@ int main(int argc, char *argv[]) {
 
   if (matrix_options.chain_length > 3) {
     printf("Using LUMOS arrangement...\n");
-    generatePixelLookup();
     matrix->ApplyStaticTransformer(LumosArrangementTransformer());
   }
 
