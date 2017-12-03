@@ -47,7 +47,7 @@ float maxReadTemp = 40;
 float targetTempOffset = 6;
 float movingTempOffset = 1.5;
 int blurRange = 2;
-float interpolationSpeed = 0.5;
+float interpolationSpeed = 0.35;
 float bloomBurst = 2;
 bool isI2CValid = true;
 bool hasI2C = true;
@@ -224,6 +224,25 @@ float readThermistor () {
   }
 }
 
+void resetFPS () {
+  if (!hasI2C) return;
+  try {
+    // enter normal mode
+    if (wiringPiI2CWriteReg8(i2c, AMG88xx_PCTL, (unsigned int)0) < 0) {
+      printf("Error entering normal mode on I2C\n");
+      return;
+    }
+    // set FPS to 10
+    if (wiringPiI2CWriteReg8(i2c, AMG88xx_FPSC, (unsigned int)0) < 0) {
+      printf("Error setting FPS on I2C\n");
+      return;
+    }
+  } catch (const std::exception& err) {
+    printf("Could not open I2C connection...\n");
+    return;
+  }
+}
+
 void readPixels (float *buf) {
   // float converted;
 	// uint8_t bytesToRead = min(size << 1, AMG88xx_PIXEL_ARRAY_SIZE << 1);
@@ -241,6 +260,11 @@ void readPixels (float *buf) {
     y = SENSOR_HEIGHT - y - 1;
     int srcIndex = (SENSOR_HEIGHT - x - 1) * SENSOR_WIDTH + y;
     uint16_t raw = wiringPiI2CReadReg16(i2c, AMG88xx_PIXEL_OFFSET + (srcIndex << 1));
+    
+    // float converted = ((float)raw);
+    // if (converted > 2047) converted = converted - 4097.0f;
+    // converted *= AMG88xx_PIXEL_TEMP_CONVERSION;
+
     float converted = signedMag12ToFloat(raw) * AMG88xx_PIXEL_TEMP_CONVERSION;
     if (converted >= CLEAN_RANGE_MAX || converted <= CLEAN_RANGE_MIN) {
       isInvalid = true;
@@ -519,10 +543,12 @@ public:
 
   double currentTime = 0.0;
   double sensorTime = 0.0;
+  double fpsResetTime = 0;
+  double fpsResetDelay = 1;
   double sensorInterval = 1.0 / RENDER_FPS;
   double frameTime = 0.0;
   double frameInterval = 1.0 / 30;
-  double resetInterval = 60 * 1;
+  double resetInterval = 60 * 2;
   double resetTime = 0;
 
   FastNoise noise; // Create a FastNoise object
@@ -560,6 +586,13 @@ public:
           hasI2C = writeI2C();
           printf("Initial Reset %d\n", hasI2C);
         }
+      }
+
+      fpsResetTime += dt;
+      if (sensorReady && fpsResetTime > fpsResetDelay) {
+        fpsResetTime = 0;
+        // printf("Reset FPS\n");
+        resetFPS();
       }
 
       resetTime += dt;
@@ -625,7 +658,6 @@ public:
     int srcY = ((y * yRatio) >> 16);
     float interaction = (isI2CValid && hasI2C) ? sensor->getValueAtPixel(srcX, srcY) : 0;
 
-
     float zoom, speed;
 
     // mix secondary with primary using noise
@@ -636,7 +668,7 @@ public:
     tempColor->lerp(colorIdle0, n2);
 
     // mix color in with noise
-    zoom = 70 * 2;
+    zoom = 80 * 2;
     speed = 35;
     float n1 = (noise.GetNoise(xCoord * zoom * aspect, yCoord * zoom, currentTime * speed) * 0.5 + 0.5);
     n1 = clamp(powf(n1, 1.5), 0, 1);
@@ -653,7 +685,7 @@ public:
       // float v = interaction;
       // fragColor->setRGBFloat(v, v, v);
       // move toward overall warmth color
-      fragColor->lerp(tempColor, sensor->getWarmthValue());
+      fragColor->lerp(tempColor, sensor->getWarmthValue() * 0.35);
       // fragColor->setRGBFloat(interaction, interaction, interaction);
     }
   }
