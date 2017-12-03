@@ -9,6 +9,7 @@
 #include "threaded-canvas-manipulator.h"
 #include "transformer.h"
 #include "graphics.h"
+#include <chrono>
 
 #include <assert.h>
 #include <getopt.h>
@@ -19,7 +20,15 @@
 #include <stdlib.h>
 #include <unistd.h>
 
+#include <deque>
+
+#include <iostream>
+#include <chrono>
+
 #include <algorithm>
+#include <wiringPi.h>
+#include <wiringPiI2C.h>
+#include "FastNoise.h"
 
 using std::min;
 using std::max;
@@ -29,992 +38,610 @@ using std::max;
 
 using namespace rgb_matrix;
 
+float MINTEMP = 20; // 26
+float MAXTEMP = 34; // 32
+float CLEAN_RANGE_MIN = -60;
+float CLEAN_RANGE_MAX = 250;
+float minReadTemp = -10;
+float maxReadTemp = 40;
+float targetTempOffset = 6;
+float movingTempOffset = 1.5;
+int blurRange = 2;
+float interpolationSpeed = 0.5;
+float bloomBurst = 2;
+bool isI2CValid = true;
+bool hasI2C = true;
+
+int SENSOR_WIDTH = 8;
+int SENSOR_HEIGHT = 8;
+int AMG88xx_I2CADD = 0x69;
+int AMG88xx_PCTL = 0x00;
+int AMG88xx_RST = 0x01;
+int AMG88xx_FPSC = 0x02;
+int AMG88xx_INTC = 0x03;
+int AMG88xx_TTHL = 0x0E;
+int AMG88xx_PIXEL_OFFSET = 0x80;
+int AMG88xx_INITIAL_RESET = 0x3F;
+#define AMG88xx_PIXEL_ARRAY_SIZE 64
+double AMG88xx_PIXEL_TEMP_CONVERSION = 0.25;
+double AMG88xx_THERMISTOR_CONVERSION = 0.0625;
+float SENSOR_FPS = 10;
+float RENDER_FPS = 30;
+
+int i2c;
+
+#define LED_PANEL_SIZE 32
+#define LED_PANEL_COUNT 6
+#define LED_PIXELS_WIDTH LED_PANEL_SIZE * 3
+#define LED_PIXELS_HEIGHT LED_PANEL_SIZE * 3
+#define LED_PIXEL_COUNT LED_PIXELS_WIDTH * LED_PIXELS_HEIGHT
+#define LED_OUTPUT_WIDTH LED_PANEL_COUNT * LED_PANEL_SIZE
+
+bool remapPixels (int& x, int& y) {
+  int width = LED_PIXELS_WIDTH;
+  int height = LED_PIXELS_HEIGHT;
+
+  // now we remap this pixel to the new space
+  int nx = x;
+  int ny = y;
+
+  // find out which row we are on
+  int row;
+  if (y >= 0 && y < 32) row = 0;
+  else if (y >= 32 && y < 64) row = 1;
+  else if (y >= 64 && y < 96) row = 2;
+  else return false;
+
+  if (row == 0) {
+    // outside of top row bounds
+    if (x < 32 || x >= 64) return false;
+    // center top row of pixels
+    nx -= 32;
+  } else if (row == 1) {
+    // outside of middle row bounds
+    if (x < 16 || x >= 80) return false;
+    // remap the Y value to the single row format
+    ny -= 32;
+
+    if (x >= 16 && x < 48) {
+      // middle row, left panel...
+      // third panel in the chain
+      
+      // remove border
+      nx -= 16;
+      // now offset & flip horizontally to correct position
+      nx = 64 + (32 - nx - 1);
+    } else {
+      // don't need to do anything here,
+      // srcX = (48..80) - border = 32..64
+      // dstX = 32..64
+
+      // remove border
+      nx -= 16;
+      // remove first panel
+      nx -= 32;
+      // offset and flip
+      nx = 32 + (32 - nx - 1);
+    }
+
+    // flip the Y value
+    ny = 32 - ny - 1;
+  } else {
+    // outside of bounds
+    if (x < 0 || x >= 96) return false;
+
+    // remap Y value to single row
+    ny -= 64;
+    // move to last 3 panels
+    nx += (3 * 32);
+  }
+
+  // apply remap
+  x = nx;
+  y = ny;
+  return true;
+}
+
 volatile bool interrupt_received = false;
 static void InterruptHandler(int signo) {
   interrupt_received = true;
 }
 
-/*
- * The following are demo image generators. They all use the utility
- * class ThreadedCanvasManipulator to generate new frames.
- */
+float lerpf (float v0, float v1, float t) {
+  return v0 * (1 - t) + v1 * t;
+}
 
-// Simple generator that pulses through RGB and White.
-class ColorPulseGenerator : public ThreadedCanvasManipulator {
-public:
-  ColorPulseGenerator(RGBMatrix *m) : ThreadedCanvasManipulator(m), matrix_(m) {
-    off_screen_canvas_ = m->CreateFrameCanvas();
+float smoothstep (float v0, float v1, float t) {
+  float x = max(0.0f, min(1.0f, (t - v0) / (v1 - v0)));
+  return x * x * (3.0 - 2.0 * x);
+}
+
+float clamp (float v, float minVal, float maxVal) {
+  return max(minVal, min(maxVal, v));
+}
+
+float lerp (float v0, float v1, float t) {
+  return v0*(1-t)+v1*t;
+}
+
+float unlerp (float minVal, float maxVal, float value) {
+  if (minVal == maxVal) {
+    if (value > minVal) return 1;
+    else return 0;
   }
-  void Run() {
-    uint32_t continuum = 0;
-    while (running() && !interrupt_received) {
-      usleep(5 * 1000);
-      continuum += 1;
-      continuum %= 3 * 255;
-      int r = 0, g = 0, b = 0;
-      if (continuum <= 255) {
-        int c = continuum;
-        b = 255 - c;
-        r = c;
-      } else if (continuum > 255 && continuum <= 511) {
-        int c = continuum - 256;
-        r = 255 - c;
-        g = c;
-      } else {
-        int c = continuum - 512;
-        g = 255 - c;
-        b = c;
-      }
-      off_screen_canvas_->Fill(r, g, b);
-      off_screen_canvas_ = matrix_->SwapOnVSync(off_screen_canvas_);
-    }
-  }
+  return (value - minVal) / (maxVal - minVal);
+}
 
-private:
-  RGBMatrix *const matrix_;
-  FrameCanvas *off_screen_canvas_;
-};
+float unlerpClamp (float minVal, float maxVal, float value) {
+  return unlerp(minVal, maxVal, clamp(value, minVal, maxVal));
+}
 
-// Simple generator that pulses through brightness on red, green, blue and white
-class BrightnessPulseGenerator : public ThreadedCanvasManipulator {
-public:
-  BrightnessPulseGenerator(RGBMatrix *m)
-    : ThreadedCanvasManipulator(m), matrix_(m) {}
-  void Run() {
-    const uint8_t max_brightness = matrix_->brightness();
-    const uint8_t c = 255;
-    uint8_t count = 0;
-
-    while (running() && !interrupt_received) {
-      if (matrix_->brightness() < 1) {
-        matrix_->SetBrightness(max_brightness);
-        count++;
-      } else {
-        matrix_->SetBrightness(matrix_->brightness() - 1);
-      }
-
-      switch (count % 4) {
-      case 0: matrix_->Fill(c, 0, 0); break;
-      case 1: matrix_->Fill(0, c, 0); break;
-      case 2: matrix_->Fill(0, 0, c); break;
-      case 3: matrix_->Fill(c, c, c); break;
-      }
-
-      usleep(20 * 1000);
-    }
-  }
-
-private:
-  RGBMatrix *const matrix_;
-};
-
-class SimpleSquare : public ThreadedCanvasManipulator {
-public:
-  SimpleSquare(Canvas *m) : ThreadedCanvasManipulator(m) {}
-  void Run() {
-    const int width = canvas()->width() - 1;
-    const int height = canvas()->height() - 1;
-    // Borders
-    DrawLine(canvas(), 0, 0,      width, 0,      Color(255, 0, 0));
-    DrawLine(canvas(), 0, height, width, height, Color(255, 255, 0));
-    DrawLine(canvas(), 0, 0,      0,     height, Color(0, 0, 255));
-    DrawLine(canvas(), width, 0,  width, height, Color(0, 255, 0));
-
-    // Diagonals.
-    DrawLine(canvas(), 0, 0,        width, height, Color(255, 255, 255));
-    DrawLine(canvas(), 0, height, width, 0,        Color(255,   0, 255));
-  }
-};
-
-class GrayScaleBlock : public ThreadedCanvasManipulator {
-public:
-  GrayScaleBlock(Canvas *m) : ThreadedCanvasManipulator(m) {}
-  void Run() {
-    const int sub_blocks = 16;
-    const int width = canvas()->width();
-    const int height = canvas()->height();
-    const int x_step = max(1, width / sub_blocks);
-    const int y_step = max(1, height / sub_blocks);
-    uint8_t count = 0;
-    while (running() && !interrupt_received) {
-      for (int y = 0; y < height; ++y) {
-        for (int x = 0; x < width; ++x) {
-          int c = sub_blocks * (y / y_step) + x / x_step;
-          switch (count % 4) {
-          case 0: canvas()->SetPixel(x, y, c, c, c); break;
-          case 1: canvas()->SetPixel(x, y, c, 0, 0); break;
-          case 2: canvas()->SetPixel(x, y, 0, c, 0); break;
-          case 3: canvas()->SetPixel(x, y, 0, 0, c); break;
-          }
-        }
-      }
-      count++;
-      sleep(2);
-    }
-  }
-};
-
-// Simple class that generates a rotating block on the screen.
-class RotatingBlockGenerator : public ThreadedCanvasManipulator {
-public:
-  RotatingBlockGenerator(Canvas *m) : ThreadedCanvasManipulator(m) {}
-
-  uint8_t scale_col(int val, int lo, int hi) {
-    if (val < lo) return 0;
-    if (val > hi) return 255;
-    return 255 * (val - lo) / (hi - lo);
-  }
-
-  void Run() {
-    const int cent_x = canvas()->width() / 2;
-    const int cent_y = canvas()->height() / 2;
-
-    // The square to rotate (inner square + black frame) needs to cover the
-    // whole area, even if diagnoal. Thus, when rotating, the outer pixels from
-    // the previous frame are cleared.
-    const int rotate_square = min(canvas()->width(), canvas()->height()) * 1.41;
-    const int min_rotate = cent_x - rotate_square / 2;
-    const int max_rotate = cent_x + rotate_square / 2;
-
-    // The square to display is within the visible area.
-    const int display_square = min(canvas()->width(), canvas()->height()) * 0.7;
-    const int min_display = cent_x - display_square / 2;
-    const int max_display = cent_x + display_square / 2;
-
-    const float deg_to_rad = 2 * 3.14159265 / 360;
-    int rotation = 0;
-    while (running() && !interrupt_received) {
-      ++rotation;
-      usleep(15 * 1000);
-      rotation %= 360;
-      for (int x = min_rotate; x < max_rotate; ++x) {
-        for (int y = min_rotate; y < max_rotate; ++y) {
-          float rot_x, rot_y;
-          Rotate(x - cent_x, y - cent_x,
-                 deg_to_rad * rotation, &rot_x, &rot_y);
-          if (x >= min_display && x < max_display &&
-              y >= min_display && y < max_display) { // within display square
-            canvas()->SetPixel(rot_x + cent_x, rot_y + cent_y,
-                               scale_col(x, min_display, max_display),
-                               255 - scale_col(y, min_display, max_display),
-                               scale_col(y, min_display, max_display));
-          } else {
-            // black frame.
-            canvas()->SetPixel(rot_x + cent_x, rot_y + cent_y, 0, 0, 0);
-          }
-        }
-      }
-    }
-  }
-
-private:
-  void Rotate(int x, int y, float angle,
-              float *new_x, float *new_y) {
-    *new_x = x * cosf(angle) - y * sinf(angle);
-    *new_y = x * sinf(angle) + y * cosf(angle);
-  }
-};
-
-class ImageScroller : public ThreadedCanvasManipulator {
-public:
-  // Scroll image with "scroll_jumps" pixels every "scroll_ms" milliseconds.
-  // If "scroll_ms" is negative, don't do any scrolling.
-  ImageScroller(RGBMatrix *m, int scroll_jumps, int scroll_ms = 30)
-    : ThreadedCanvasManipulator(m), scroll_jumps_(scroll_jumps),
-      scroll_ms_(scroll_ms),
-      horizontal_position_(0),
-      matrix_(m) {
-    offscreen_ = matrix_->CreateFrameCanvas();
-  }
-
-  virtual ~ImageScroller() {
-    Stop();
-    WaitStopped();   // only now it is safe to delete our instance variables.
-  }
-
-  // _very_ simplified. Can only read binary P6 PPM. Expects newlines in headers
-  // Not really robust. Use at your own risk :)
-  // This allows reload of an image while things are running, e.g. you can
-  // life-update the content.
-  bool LoadPPM(const char *filename) {
-    FILE *f = fopen(filename, "r");
-    // check if file exists
-    if (f == NULL && access(filename, F_OK) == -1) {
-      fprintf(stderr, "File \"%s\" doesn't exist\n", filename);
+bool writeI2C () {
+  try {
+    // enter normal mode
+    if (wiringPiI2CWriteReg8(i2c, AMG88xx_PCTL, (unsigned int)0) < 0) {
+      printf("Error entering normal mode on I2C\n");
       return false;
     }
-    if (f == NULL) return false;
-    char header_buf[256];
-    const char *line = ReadLine(f, header_buf, sizeof(header_buf));
-#define EXIT_WITH_MSG(m) { fprintf(stderr, "%s: %s |%s", filename, m, line); \
-      fclose(f); return false; }
-    if (sscanf(line, "P6 ") == EOF)
-      EXIT_WITH_MSG("Can only handle P6 as PPM type.");
-    line = ReadLine(f, header_buf, sizeof(header_buf));
-    int new_width, new_height;
-    if (!line || sscanf(line, "%d %d ", &new_width, &new_height) != 2)
-      EXIT_WITH_MSG("Width/height expected");
-    int value;
-    line = ReadLine(f, header_buf, sizeof(header_buf));
-    if (!line || sscanf(line, "%d ", &value) != 1 || value != 255)
-      EXIT_WITH_MSG("Only 255 for maxval allowed.");
-    const size_t pixel_count = new_width * new_height;
-    Pixel *new_image = new Pixel [ pixel_count ];
-    assert(sizeof(Pixel) == 3);   // we make that assumption.
-    if (fread(new_image, sizeof(Pixel), pixel_count, f) != pixel_count) {
-      line = "";
-      EXIT_WITH_MSG("Not enough pixels read.");
+    // initial reset
+    int initialReset = AMG88xx_INITIAL_RESET & ((1 << 8) - 1);
+    if (wiringPiI2CWriteReg8(i2c, AMG88xx_RST, (unsigned int)(initialReset)) < 0) {
+      printf("Error sending initial reset on I2C\n");
+      return false;
     }
-#undef EXIT_WITH_MSG
-    fclose(f);
-    fprintf(stderr, "Read image '%s' with %dx%d\n", filename,
-            new_width, new_height);
-    horizontal_position_ = 0;
-    MutexLock l(&mutex_new_image_);
-    new_image_.Delete();  // in case we reload faster than is picked up
-    new_image_.image = new_image;
-    new_image_.width = new_width;
-    new_image_.height = new_height;
-    return true;
-  }
-
-  void Run() {
-    const int screen_height = offscreen_->height();
-    const int screen_width = offscreen_->width();
-    while (running() && !interrupt_received) {
-      {
-        MutexLock l(&mutex_new_image_);
-        if (new_image_.IsValid()) {
-          current_image_.Delete();
-          current_image_ = new_image_;
-          new_image_.Reset();
-        }
-      }
-      if (!current_image_.IsValid()) {
-        usleep(100 * 1000);
-        continue;
-      }
-      for (int x = 0; x < screen_width; ++x) {
-        for (int y = 0; y < screen_height; ++y) {
-          const Pixel &p = current_image_.getPixel(
-            (horizontal_position_ + x) % current_image_.width, y);
-          offscreen_->SetPixel(x, y, p.red, p.green, p.blue);
-        }
-      }
-      offscreen_ = matrix_->SwapOnVSync(offscreen_);
-      horizontal_position_ += scroll_jumps_;
-      if (horizontal_position_ < 0) horizontal_position_ = current_image_.width;
-      if (scroll_ms_ <= 0) {
-        // No scrolling. We don't need the image anymore.
-        current_image_.Delete();
-      } else {
-        usleep(scroll_ms_ * 1000);
-      }
+    // disable interrupt mode
+    if (wiringPiI2CWriteReg8(i2c, AMG88xx_INTC, (unsigned int)0) < 0) {
+      printf("Error disabling interrupt mode on I2C\n");
+      return false;
     }
-  }
-
-private:
-  struct Pixel {
-    Pixel() : red(0), green(0), blue(0){}
-    uint8_t red;
-    uint8_t green;
-    uint8_t blue;
-  };
-
-  struct Image {
-    Image() : width(-1), height(-1), image(NULL) {}
-    ~Image() { Delete(); }
-    void Delete() { delete [] image; Reset(); }
-    void Reset() { image = NULL; width = -1; height = -1; }
-    inline bool IsValid() { return image && height > 0 && width > 0; }
-    const Pixel &getPixel(int x, int y) {
-      static Pixel black;
-      if (x < 0 || x >= width || y < 0 || y >= height) return black;
-      return image[x + width * y];
+    // set FPS to 10
+    if (wiringPiI2CWriteReg8(i2c, AMG88xx_FPSC, (unsigned int)0) < 0) {
+      printf("Error setting FPS on I2C\n");
+      return false;
     }
-
-    int width;
-    int height;
-    Pixel *image;
-  };
-
-  // Read line, skip comments.
-  char *ReadLine(FILE *f, char *buffer, size_t len) {
-    char *result;
-    do {
-      result = fgets(buffer, len, f);
-    } while (result != NULL && result[0] == '#');
-    return result;
+  } catch (const std::exception& err) {
+    printf("Could not open I2C connection...\n");
+    return false;
   }
+  return true;
+}
 
-  const int scroll_jumps_;
-  const int scroll_ms_;
+float signedMag12ToFloat(uint16_t val) {
+  //take first 11 bits as absolute val
+  uint16_t absVal = (val & 0x7FF);
+  return (val & 0x8000) ? 0 - (float)absVal : (float)absVal;
+}
 
-  // Current image is only manipulated in our thread.
-  Image current_image_;
+float readThermistor () {
+  if (!hasI2C) return -1.0;
+  else {
+    // get current
+    uint16_t rawVal = wiringPiI2CReadReg16(i2c, AMG88xx_TTHL);
+    return signedMag12ToFloat(rawVal) * AMG88xx_THERMISTOR_CONVERSION;
+  }
+}
 
-  // New image can be loaded from another thread, then taken over in main thread
-  Mutex mutex_new_image_;
-  Image new_image_;
+void readPixels (float *buf) {
+  // float converted;
+	// uint8_t bytesToRead = min(size << 1, AMG88xx_PIXEL_ARRAY_SIZE << 1);
+	// uint8_t rawArray[bytesToRead];
+	// this->read(AMG88xx_PIXEL_OFFSET, rawArray, bytesToRead);
+	bool isInvalid = false;
+  // float avg = 0;
+  // printf("thermistor: %f   ", readThermistor());
+  float thermistor = abs(readThermistor()) / 2.0;
+  
+	for(int i = 0; i < AMG88xx_PIXEL_ARRAY_SIZE; i++){
+    int x = i % SENSOR_WIDTH;
+    int y = i / SENSOR_WIDTH;
+    // int srcIndex = i;
+    y = SENSOR_HEIGHT - y - 1;
+    int srcIndex = (SENSOR_HEIGHT - x - 1) * SENSOR_WIDTH + y;
+    uint16_t raw = wiringPiI2CReadReg16(i2c, AMG88xx_PIXEL_OFFSET + (srcIndex << 1));
+    float converted = signedMag12ToFloat(raw) * AMG88xx_PIXEL_TEMP_CONVERSION;
+    if (converted >= CLEAN_RANGE_MAX || converted <= CLEAN_RANGE_MIN) {
+      isInvalid = true;
+      // printf("I2C is invalid %f\n", converted);
+      converted = thermistor;
+    }
+    // avg += converted;
+    // converted = clamp(converted, -minReadTemp, maxReadTemp);
+    
+    // x = SENSOR_WIDTH - x - 1;
+    // y = SENSOR_HEIGHT - y - 1;
+    // int dstIndex = x + (y * SENSOR_WIDTH);
 
-  int32_t horizontal_position_;
+// data[];
 
-  RGBMatrix* matrix_;
-  FrameCanvas* offscreen_;
+    buf[i] = converted;
+    // printf("%f ", buf[i]);
+  }
+  // avg /= (float)AMG88xx_PIXEL_ARRAY_SIZE;
+  // printf("thermister: %f, pixel average: %f\n", readThermistor(), avg);
+
+  // once we exit a clean state, expect it to always be dirty
+  if (isI2CValid && isInvalid) {
+    // printf("I2C is no longer valid!\n");
+    // isI2CValid = false;
+  }
+  // printf("\n");
+  
+}
+
+class Vec2 {
+public:
+  float x;
+  float y;
+
+  Vec2(int _x, int _y) {
+    x = _x;
+    y = _y;
+  }
+  void copy (Vec2 *other) {
+    x = other->x;
+    y = other->y;
+  }
+  void set (float _x, float _y) {
+    x = _x;
+    y = _y;
+  }
+  void lerp (Vec2 *other, float alpha) {
+		x += (other->x - x) * alpha;
+		y += (other->y - y) * alpha;
+  }
+  float length () {
+    return sqrt(x * x + y * y);
+  }
+  float lengthSq () {
+    return x * x + y * y;
+  }
 };
 
-
-// Abelian sandpile
-// Contributed by: Vliedel
-class Sandpile : public ThreadedCanvasManipulator {
+class ColorRGB {
 public:
-  Sandpile(Canvas *m, int delay_ms=50)
-    : ThreadedCanvasManipulator(m), delay_ms_(delay_ms) {
-    width_ = canvas()->width() - 1; // We need an odd width
-    height_ = canvas()->height() - 1; // We need an odd height
+  int r;
+  int g;
+  int b;
 
-    // Allocate memory
-    values_ = new int*[width_];
-    for (int x=0; x<width_; ++x) {
-      values_[x] = new int[height_];
+  ColorRGB(int _r, int _g, int _b) {
+    r = _r;
+    g = _g;
+    b = _b;
+  }
+  void setRGBFloat (float rf, float gf, float bf) {
+    r = (int)(rf * 255);
+    g = (int)(gf * 255);
+    b = (int)(bf * 255);
+  }
+  void clampBytes () {
+    r = clamp(r, 0, 255);
+    g = clamp(g, 0, 255);
+    b = clamp(b, 0, 255);
+  }
+  void copy (ColorRGB *other) {
+    r = other->r;
+    g = other->g;
+    b = other->b;
+  }
+  void lerp (ColorRGB *color, float alpha) {
+		r += (color->r - r) * alpha;
+		g += (color->g - g) * alpha;
+    b += (color->b - b) * alpha;
+  }
+};
+
+class TemperatureView {
+public:
+  // the raw 8x8 temperatures
+  float temperatures[AMG88xx_PIXEL_ARRAY_SIZE];
+
+  // tweened 8x8 temperatures
+  float interpolatedTemperatures[AMG88xx_PIXEL_ARRAY_SIZE];
+  float tempBloomTemperatures[AMG88xx_PIXEL_ARRAY_SIZE];
+  float bloomedTemperatures[AMG88xx_PIXEL_ARRAY_SIZE];
+
+  std::deque<float> movingAverages;
+  float movingAverageTemp = MINTEMP;
+  float currentAverage = MINTEMP;
+
+  float newAverage = MINTEMP;
+  float periodTime = 30;
+  int averagePeriod = (int)(periodTime * SENSOR_FPS);
+  float newMovingAverageTemp = MINTEMP;
+  float warmth = 0;
+  float newWarmth = 0;
+  float warmthAmbient = 0.75;
+  float warmingFactor = 0.1;
+  float warmingSpeed = 0.01;
+
+  TemperatureView () {
+    // clear temperatures
+    for (int i = 0; i < AMG88xx_PIXEL_ARRAY_SIZE; i++) {
+      temperatures[i] = MINTEMP;
+      interpolatedTemperatures[i] = MINTEMP;
+      tempBloomTemperatures[i] = 0;
+      bloomedTemperatures[i] = 0;
     }
-    newValues_ = new int*[width_];
-    for (int x=0; x<width_; ++x) {
-      newValues_[x] = new int[height_];
+  }
+
+  float getValueAtPixel (int x, int y) {
+    return bloomedTemperatures[y * SENSOR_WIDTH + x];
+    // float temp = interpolatedTemperatures[(y * SENSOR_WIDTH) + x];
+    // return unlerpClamp(movingAverageTemp + movingTempOffset, targetTemp, temp);
+  }
+
+  float getWarmthValue () {
+    return warmth * warmthAmbient;
+  }
+
+  void update () {
+    // get the average temperature of the current set of pixels
+    // and the min / max temperature
+    newAverage = 0.0;
+
+    // float currentMin = MAXTEMP;
+    // float currentMax = MINTEMP;
+    for (int i = 0; i < AMG88xx_PIXEL_ARRAY_SIZE; i++) {
+      float temperature = temperatures[i];
+      newAverage += temperature;
+      // if (temperature < currentMin) currentMin = temperature;
+      // if (temperature > currentMax) currentMax = temperature;
+    }
+    newAverage /= AMG88xx_PIXEL_ARRAY_SIZE;
+
+    // compute the new rolling averages
+    movingAverages.push_back(newAverage);
+    if (movingAverages.size() > averagePeriod) {
+      movingAverages.pop_front();
     }
 
-    // Init values
-    srand(time(NULL));
-    for (int x=0; x<width_; ++x) {
-      for (int y=0; y<height_; ++y) {
-        values_[x][y] = 0;
+    int count = movingAverages.size();
+    newMovingAverageTemp = 0;
+    for (int i = 0; i < count; i++) {
+      newMovingAverageTemp += movingAverages[i];
+    }
+    newMovingAverageTemp /= count;
+  }
+
+  void blur (bool horizontal, int range) {
+    for (int i = 0; i < AMG88xx_PIXEL_ARRAY_SIZE; i++) {
+      tempBloomTemperatures[i] = bloomedTemperatures[i];
+    }
+
+    for (int i = 0; i < AMG88xx_PIXEL_ARRAY_SIZE; i++) {
+      int count = 0;
+      float sum = 0;
+
+      int x = i % SENSOR_WIDTH;
+      int y = i / SENSOR_WIDTH;
+
+      int lineIndex = horizontal ? x : y;
+      int minVal = max(0, lineIndex - range);
+      int maxVal = min(SENSOR_WIDTH - 1, lineIndex + range);
+      for (int j = minVal; j <= maxVal; j++) {
+        int nx = horizontal ? j : x;
+        int ny = horizontal ? y : j;
+        sum += bloomedTemperatures[nx + (ny * SENSOR_WIDTH)] * bloomBurst;
+        count++;
       }
+      float finalColor = count == 0 ? 0 : sum / count;
+      tempBloomTemperatures[i] = clamp(finalColor, 0, 1);
+    }
+
+    for (int i = 0; i < AMG88xx_PIXEL_ARRAY_SIZE; i++) {
+      bloomedTemperatures[i] = tempBloomTemperatures[i];
     }
   }
 
-  ~Sandpile() {
-    for (int x=0; x<width_; ++x) {
-      delete [] values_[x];
-    }
-    delete [] values_;
-    for (int x=0; x<width_; ++x) {
-      delete [] newValues_[x];
-    }
-    delete [] newValues_;
-  }
+  void interpolate () {
+    movingAverageTemp = lerp(movingAverageTemp, newMovingAverageTemp, interpolationSpeed);
+    currentAverage = lerp(currentAverage, newAverage, interpolationSpeed);
 
-  void Run() {
+    newWarmth = 0;
+    for (int i = 0; i < AMG88xx_PIXEL_ARRAY_SIZE; i++) {
+      float f = lerp(interpolatedTemperatures[i], temperatures[i], interpolationSpeed);
+      interpolatedTemperatures[i] = f;
+
+      float unlerpedPixel = unlerpClamp(movingAverageTemp + movingTempOffset, movingAverageTemp + movingTempOffset + targetTempOffset, f);
+      bloomedTemperatures[i] = unlerpedPixel;
+      // int x = i % SENSOR_WIDTH;
+      // int y = i / SENSOR_WIDTH;
+      // x = SENSOR_WIDTH - x - 1;
+      // int dstIndex = x + (y * SENSOR_WIDTH);
+      
+      // get total 
+      float pixelWarmth = unlerpedPixel;
+      newWarmth += pixelWarmth * warmingFactor;
+    }
+    newWarmth = min(1.0f, newWarmth);
+    warmth = lerp(warmth, newWarmth, warmingSpeed);
+
+    // bloom the pixels a bit
+    if (blurRange > 0) {
+      blur(true, blurRange);
+      blur(false, blurRange);
+    }
+  }
+};
+
+// // Simple class that generates a rotating block on the screen.
+// class TestView : public ThreadedCanvasManipulator {
+// public:
+//   ColorRGB *colorBlack = new ColorRGB(0, 0, 0);
+
+//   TestView(Canvas *m) : ThreadedCanvasManipulator(m) {}
+
+//   void Run () {
+//     int width = 96;
+//     int height = 96;
+//     ColorRGB *fragColor = new ColorRGB(0, 0, 0);
+
+//     canvas()->Fill(0, 0, 0);
+//     printf("WidthHeight %d x %d\n", width, height);
+//     for (int i = 0; i < 96; i++) {
+//       int x = i;
+//       int y = 33;
+//       float px = x / (float)width;
+//       int v = (int)(px*255);
+//       // printf("Setting %dx%d\n", x, y);
+//       if (remapPixels(x, y)) {
+//         canvas()->SetPixel(x, y, v, 0, 0);
+//       }
+//     }
+//   }
+// };
+
+// Simple class that generates a rotating block on the screen.
+class SDFGen : public ThreadedCanvasManipulator {
+public:
+  typedef std::chrono::high_resolution_clock clock_;
+  typedef std::chrono::duration<double, std::ratio<1> > second_;
+  std::chrono::time_point<clock_> lastTime;
+  Vec2 *tempVec = new Vec2(0, 0);
+
+  ColorRGB *colorBlack = new ColorRGB(0, 0, 0);
+  ColorRGB *colorWhite = new ColorRGB(255, 255, 255);
+  ColorRGB *colorRed = new ColorRGB(255, 0, 0);
+
+  ColorRGB *colorIdle0 = new ColorRGB(57, 183, 255);
+  ColorRGB *colorIdle1 = new ColorRGB(30, 255, 195);
+  ColorRGB *colorIdle2 = new ColorRGB(62, 50, 239); //57, 76, 255
+
+  ColorRGB *colorDrama0 = new ColorRGB(70, 22, 244);//34, 1, 247
+
+  ColorRGB *colorActive0 = new ColorRGB(255, 0, 0);
+  ColorRGB *colorActive1 = new ColorRGB(249, 145, 10);
+  ColorRGB *baseColor = new ColorRGB(0, 0, 0);
+  ColorRGB *tempColor = new ColorRGB(0, 0, 0);
+
+  double currentTime = 0.0;
+  double sensorTime = 0.0;
+  double sensorInterval = 1.0 / RENDER_FPS;
+  double frameTime = 0.0;
+  double frameInterval = 1.0 / 30;
+  double resetInterval = 60 * 2;
+  double resetTime = 0;
+
+  FastNoise noise; // Create a FastNoise object
+  TemperatureView *sensor = new TemperatureView();
+
+  SDFGen(Canvas *m) : ThreadedCanvasManipulator(m) {}
+
+  void Run () {
+    int width = 96;
+    int height = 96;
+    ColorRGB *fragColor = new ColorRGB(0, 0, 0);
+
+    noise.SetNoiseType(FastNoise::Simplex); // Set the desired noise type
+
+    // start time
+    lastTime = clock_::now();
+
     while (running() && !interrupt_received) {
-      // Drop a sand grain in the centre
-      values_[width_/2][height_/2]++;
-      updateValues();
+      // printf("thermistor %f, current average %f, moving average %f\n", readThermistor(), sensor->currentAverage, sensor->movingAverageTemp + movingTempOffset);
+      std::chrono::time_point<clock_> newTime = clock_::now();
+      double dt = std::chrono::duration_cast<second_>(newTime - lastTime).count();
+      currentTime += dt;
+      lastTime = newTime;
+      sensorTime += dt;
 
-      for (int x=0; x<width_; ++x) {
-        for (int y=0; y<height_; ++y) {
-          switch (values_[x][y]) {
-          case 0:
-            canvas()->SetPixel(x, y, 0, 0, 0);
-            break;
-          case 1:
-            canvas()->SetPixel(x, y, 0, 0, 200);
-            break;
-          case 2:
-            canvas()->SetPixel(x, y, 0, 200, 0);
-            break;
-          case 3:
-            canvas()->SetPixel(x, y, 150, 100, 0);
-            break;
-          default:
-            canvas()->SetPixel(x, y, 200, 0, 0);
+      resetTime += dt;
+      if (resetTime > resetInterval) {
+        resetTime = 0;
+        // if (hasI2C) {
+        hasI2C = writeI2C();
+        printf("Reset %d\n", hasI2C);
+        // }
+      }
+      if (hasI2C && sensorTime > sensorInterval) {
+        sensorTime = 0.0;
+        // read into temperatures
+        readPixels(sensor->temperatures);
+        // update view
+        sensor->update();
+        // printf("Avg temp %f\n", sensor->currentAverage);
+      }
+      frameTime += dt;
+      if (frameTime > frameInterval) {
+        frameTime = 0.0;
+        // usleep(15 * 1000);
+        // interpolate toward the new rolling averages
+        if (hasI2C) sensor->interpolate();
+        // printf("temp %f\n", newAverage);
+
+        float colorOffset = sinf(currentTime * 0.25) * 0.5 + 0.5;
+        // choose secondary color based on slowly rotating offset
+        baseColor->copy(colorIdle1);
+        baseColor->lerp(colorIdle2, colorOffset);
+
+        // slowly rotate to a more dramatic secondary color
+        float coloroffset2 = sinf(currentTime * 0.1) * 0.5 + 0.5;
+        coloroffset2 = smoothstep(0.0, 0.1, coloroffset2);
+        baseColor->lerp(colorDrama0, coloroffset2);
+
+        for (int i = 0; i < width * height; i++) {
+          int x = i % width;
+          int y = i / width;
+
+          float px = (x / (float)width);
+          float py = (y / (float)height);
+
+          // flip image before rendering
+          int dstX = x;
+          int dstY = y;
+          if (remapPixels(dstX, dstY)) {
+            fragColor->copy(colorBlack);
+            pixelShader(fragColor, x, y, px, py, (float)width, (float)height, i);
+            fragColor->clampBytes();
+            canvas()->SetPixel(dstX, dstY, fragColor->r, fragColor->g, fragColor->b);
           }
         }
       }
-      usleep(delay_ms_ * 1000); // ms
     }
   }
 
-private:
-  void updateValues() {
-    // Copy values to newValues
-    for (int x=0; x<width_; ++x) {
-      for (int y=0; y<height_; ++y) {
-        newValues_[x][y] = values_[x][y];
-      }
-    }
+  void pixelShader (ColorRGB *fragColor, int x, int y, float xCoord, float yCoord, float width, float height, int index) {
+    float aspect = width / height;
 
-    // Update newValues based on values
-    for (int x=0; x<width_; ++x) {
-      for (int y=0; y<height_; ++y) {
-        if (values_[x][y] > 3) {
-          // Collapse
-          if (x>0)
-            newValues_[x-1][y]++;
-          if (x<width_-1)
-            newValues_[x+1][y]++;
-          if (y>0)
-            newValues_[x][y-1]++;
-          if (y<height_-1)
-            newValues_[x][y+1]++;
-          newValues_[x][y] -= 4;
-        }
-      }
-    }
-    // Copy newValues to values
-    for (int x=0; x<width_; ++x) {
-      for (int y=0; y<height_; ++y) {
-        values_[x][y] = newValues_[x][y];
-      }
-    }
-  }
+    int xRatio = (int)((SENSOR_WIDTH << 16) / width) + 1;
+    int yRatio = (int)((SENSOR_HEIGHT << 16) / height) + 1;
 
-  int width_;
-  int height_;
-  int** values_;
-  int** newValues_;
-  int delay_ms_;
-};
+    int srcX = ((x * xRatio) >> 16);
+    int srcY = ((y * yRatio) >> 16);
+    float interaction = (isI2CValid && hasI2C) ? sensor->getValueAtPixel(srcX, srcY) : 0;
 
 
-// Conway's game of life
-// Contributed by: Vliedel
-class GameLife : public ThreadedCanvasManipulator {
-public:
-  GameLife(Canvas *m, int delay_ms=500, bool torus=true)
-    : ThreadedCanvasManipulator(m), delay_ms_(delay_ms), torus_(torus) {
-    width_ = canvas()->width();
-    height_ = canvas()->height();
+    float zoom, speed;
 
-    // Allocate memory
-    values_ = new int*[width_];
-    for (int x=0; x<width_; ++x) {
-      values_[x] = new int[height_];
-    }
-    newValues_ = new int*[width_];
-    for (int x=0; x<width_; ++x) {
-      newValues_[x] = new int[height_];
-    }
+    // mix secondary with primary using noise
+    zoom = 40 * 2;
+    speed = 25 * 0.5;
+    float n2 = (noise.GetNoise(xCoord * zoom * aspect, yCoord * zoom, currentTime * speed) * 0.5 + 0.5);
+    tempColor->copy(baseColor);
+    tempColor->lerp(colorIdle0, n2);
 
-    // Init values randomly
-    srand(time(NULL));
-    for (int x=0; x<width_; ++x) {
-      for (int y=0; y<height_; ++y) {
-        values_[x][y]=rand()%2;
-      }
-    }
-    r_ = rand()%255;
-    g_ = rand()%255;
-    b_ = rand()%255;
+    // mix color in with noise
+    zoom = 70 * 2;
+    speed = 35;
+    float n1 = (noise.GetNoise(xCoord * zoom * aspect, yCoord * zoom, currentTime * speed) * 0.5 + 0.5);
+    n1 = clamp(powf(n1, 1.5), 0, 1);
+    fragColor->lerp(tempColor, n1);
 
-    if (r_<150 && g_<150 && b_<150) {
-      int c = rand()%3;
-      switch (c) {
-      case 0:
-        r_ = 200;
-        break;
-      case 1:
-        g_ = 200;
-        break;
-      case 2:
-        b_ = 200;
-        break;
-      }
+    // apply interaction color
+    // fragColor->copy(colorBlack);
+    if (isI2CValid && hasI2C) {
+      // now mix in active color
+      tempColor->copy(colorActive0);
+      tempColor->lerp(colorActive1, n1);
+
+      fragColor->lerp(tempColor, interaction);
+      // float v = interaction;
+      // fragColor->setRGBFloat(v, v, v);
+      // move toward overall warmth color
+      fragColor->lerp(tempColor, sensor->getWarmthValue());
+      // fragColor->setRGBFloat(interaction, interaction, interaction);
     }
   }
-
-  ~GameLife() {
-    for (int x=0; x<width_; ++x) {
-      delete [] values_[x];
-    }
-    delete [] values_;
-    for (int x=0; x<width_; ++x) {
-      delete [] newValues_[x];
-    }
-    delete [] newValues_;
-  }
-
-  void Run() {
-    while (running() && !interrupt_received) {
-
-      updateValues();
-
-      for (int x=0; x<width_; ++x) {
-        for (int y=0; y<height_; ++y) {
-          if (values_[x][y])
-            canvas()->SetPixel(x, y, r_, g_, b_);
-          else
-            canvas()->SetPixel(x, y, 0, 0, 0);
-        }
-      }
-      usleep(delay_ms_ * 1000); // ms
-    }
-  }
-
-private:
-  int numAliveNeighbours(int x, int y) {
-    int num=0;
-    if (torus_) {
-      // Edges are connected (torus)
-      num += values_[(x-1+width_)%width_][(y-1+height_)%height_];
-      num += values_[(x-1+width_)%width_][y                    ];
-      num += values_[(x-1+width_)%width_][(y+1        )%height_];
-      num += values_[(x+1       )%width_][(y-1+height_)%height_];
-      num += values_[(x+1       )%width_][y                    ];
-      num += values_[(x+1       )%width_][(y+1        )%height_];
-      num += values_[x                  ][(y-1+height_)%height_];
-      num += values_[x                  ][(y+1        )%height_];
-    }
-    else {
-      // Edges are not connected (no torus)
-      if (x>0) {
-        if (y>0)
-          num += values_[x-1][y-1];
-        if (y<height_-1)
-          num += values_[x-1][y+1];
-        num += values_[x-1][y];
-      }
-      if (x<width_-1) {
-        if (y>0)
-          num += values_[x+1][y-1];
-        if (y<31)
-          num += values_[x+1][y+1];
-        num += values_[x+1][y];
-      }
-      if (y>0)
-        num += values_[x][y-1];
-      if (y<height_-1)
-        num += values_[x][y+1];
-    }
-    return num;
-  }
-
-  void updateValues() {
-    // Copy values to newValues
-    for (int x=0; x<width_; ++x) {
-      for (int y=0; y<height_; ++y) {
-        newValues_[x][y] = values_[x][y];
-      }
-    }
-    // update newValues based on values
-    for (int x=0; x<width_; ++x) {
-      for (int y=0; y<height_; ++y) {
-        int num = numAliveNeighbours(x,y);
-        if (values_[x][y]) {
-          // cell is alive
-          if (num < 2 || num > 3)
-            newValues_[x][y] = 0;
-        }
-        else {
-          // cell is dead
-          if (num == 3)
-            newValues_[x][y] = 1;
-        }
-      }
-    }
-    // copy newValues to values
-    for (int x=0; x<width_; ++x) {
-      for (int y=0; y<height_; ++y) {
-        values_[x][y] = newValues_[x][y];
-      }
-    }
-  }
-
-  int** values_;
-  int** newValues_;
-  int delay_ms_;
-  int r_;
-  int g_;
-  int b_;
-  int width_;
-  int height_;
-  bool torus_;
-};
-
-// Langton's ant
-// Contributed by: Vliedel
-class Ant : public ThreadedCanvasManipulator {
-public:
-  Ant(Canvas *m, int delay_ms=500)
-    : ThreadedCanvasManipulator(m), delay_ms_(delay_ms) {
-    numColors_ = 4;
-    width_ = canvas()->width();
-    height_ = canvas()->height();
-    values_ = new int*[width_];
-    for (int x=0; x<width_; ++x) {
-      values_[x] = new int[height_];
-    }
-  }
-
-  ~Ant() {
-    for (int x=0; x<width_; ++x) {
-      delete [] values_[x];
-    }
-    delete [] values_;
-  }
-
-  void Run() {
-    antX_ = width_/2;
-    antY_ = height_/2-3;
-    antDir_ = 0;
-    for (int x=0; x<width_; ++x) {
-      for (int y=0; y<height_; ++y) {
-        values_[x][y] = 0;
-        updatePixel(x, y);
-      }
-    }
-
-    while (running() && !interrupt_received) {
-      // LLRR
-      switch (values_[antX_][antY_]) {
-      case 0:
-      case 1:
-        antDir_ = (antDir_+1+4) % 4;
-        break;
-      case 2:
-      case 3:
-        antDir_ = (antDir_-1+4) % 4;
-        break;
-      }
-
-      values_[antX_][antY_] = (values_[antX_][antY_] + 1) % numColors_;
-      int oldX = antX_;
-      int oldY = antY_;
-      switch (antDir_) {
-      case 0:
-        antX_++;
-        break;
-      case 1:
-        antY_++;
-        break;
-      case 2:
-        antX_--;
-        break;
-      case 3:
-        antY_--;
-        break;
-      }
-      updatePixel(oldX, oldY);
-      if (antX_ < 0 || antX_ >= width_ || antY_ < 0 || antY_ >= height_)
-        return;
-      updatePixel(antX_, antY_);
-      usleep(delay_ms_ * 1000);
-    }
-  }
-
-private:
-  void updatePixel(int x, int y) {
-    switch (values_[x][y]) {
-    case 0:
-      canvas()->SetPixel(x, y, 200, 0, 0);
-      break;
-    case 1:
-      canvas()->SetPixel(x, y, 0, 200, 0);
-      break;
-    case 2:
-      canvas()->SetPixel(x, y, 0, 0, 200);
-      break;
-    case 3:
-      canvas()->SetPixel(x, y, 150, 100, 0);
-      break;
-    }
-    if (x == antX_ && y == antY_)
-      canvas()->SetPixel(x, y, 0, 0, 0);
-  }
-
-  int numColors_;
-  int** values_;
-  int antX_;
-  int antY_;
-  int antDir_; // 0 right, 1 up, 2 left, 3 down
-  int delay_ms_;
-  int width_;
-  int height_;
-};
-
-
-
-// Imitation of volume bars
-// Purely random height doesn't look realistic
-// Contributed by: Vliedel
-class VolumeBars : public ThreadedCanvasManipulator {
-public:
-  VolumeBars(Canvas *m, int delay_ms=50, int numBars=8)
-    : ThreadedCanvasManipulator(m), delay_ms_(delay_ms),
-      numBars_(numBars), t_(0) {
-  }
-
-  ~VolumeBars() {
-    delete [] barHeights_;
-    delete [] barFreqs_;
-    delete [] barMeans_;
-  }
-
-  void Run() {
-    const int width = canvas()->width();
-    height_ = canvas()->height();
-    barWidth_ = width/numBars_;
-    barHeights_ = new int[numBars_];
-    barMeans_ = new int[numBars_];
-    barFreqs_ = new int[numBars_];
-    heightGreen_  = height_*4/12;
-    heightYellow_ = height_*8/12;
-    heightOrange_ = height_*10/12;
-    heightRed_    = height_*12/12;
-
-    // Array of possible bar means
-    int numMeans = 10;
-    int means[10] = {1,2,3,4,5,6,7,8,16,32};
-    for (int i=0; i<numMeans; ++i) {
-      means[i] = height_ - means[i]*height_/8;
-    }
-    // Initialize bar means randomly
-    srand(time(NULL));
-    for (int i=0; i<numBars_; ++i) {
-      barMeans_[i] = rand()%numMeans;
-      barFreqs_[i] = 1<<(rand()%3);
-    }
-
-    // Start the loop
-    while (running() && !interrupt_received) {
-      if (t_ % 8 == 0) {
-        // Change the means
-        for (int i=0; i<numBars_; ++i) {
-          barMeans_[i] += rand()%3 - 1;
-          if (barMeans_[i] >= numMeans)
-            barMeans_[i] = numMeans-1;
-          if (barMeans_[i] < 0)
-            barMeans_[i] = 0;
-        }
-      }
-
-      // Update bar heights
-      t_++;
-      for (int i=0; i<numBars_; ++i) {
-        barHeights_[i] = (height_ - means[barMeans_[i]])
-          * sin(0.1*t_*barFreqs_[i]) + means[barMeans_[i]];
-        if (barHeights_[i] < height_/8)
-          barHeights_[i] = rand() % (height_/8) + 1;
-      }
-
-      for (int i=0; i<numBars_; ++i) {
-        int y;
-        for (y=0; y<barHeights_[i]; ++y) {
-          if (y<heightGreen_) {
-            drawBarRow(i, y, 0, 200, 0);
-          }
-          else if (y<heightYellow_) {
-            drawBarRow(i, y, 150, 150, 0);
-          }
-          else if (y<heightOrange_) {
-            drawBarRow(i, y, 250, 100, 0);
-          }
-          else {
-            drawBarRow(i, y, 200, 0, 0);
-          }
-        }
-        // Anything above the bar should be black
-        for (; y<height_; ++y) {
-          drawBarRow(i, y, 0, 0, 0);
-        }
-      }
-      usleep(delay_ms_ * 1000);
-    }
-  }
-
-private:
-  void drawBarRow(int bar, int y, uint8_t r, uint8_t g, uint8_t b) {
-    for (int x=bar*barWidth_; x<(bar+1)*barWidth_; ++x) {
-      canvas()->SetPixel(x, height_-1-y, r, g, b);
-    }
-  }
-
-  int delay_ms_;
-  int numBars_;
-  int* barHeights_;
-  int barWidth_;
-  int height_;
-  int heightGreen_;
-  int heightYellow_;
-  int heightOrange_;
-  int heightRed_;
-  int* barFreqs_;
-  int* barMeans_;
-  int t_;
-};
-
-/// Genetic Colors
-/// A genetic algorithm to evolve colors
-/// by bbhsu2 + anonymous
-class GeneticColors : public ThreadedCanvasManipulator {
-public:
-  GeneticColors(Canvas *m, int delay_ms = 200)
-    : ThreadedCanvasManipulator(m), delay_ms_(delay_ms) {
-    width_ = canvas()->width();
-    height_ = canvas()->height();
-    popSize_ = width_ * height_;
-
-    // Allocate memory
-    children_ = new citizen[popSize_];
-    parents_ = new citizen[popSize_];
-    srand(time(NULL));
-  }
-
-  ~GeneticColors() {
-    delete [] children_;
-    delete [] parents_;
-  }
-
-  static int rnd (int i) { return rand() % i; }
-
-  void Run() {
-    // Set a random target_
-    target_ = rand() & 0xFFFFFF;
-
-    // Create the first generation of random children_
-    for (int i = 0; i < popSize_; ++i) {
-      children_[i].dna = rand() & 0xFFFFFF;
-    }
-
-    while (running() && !interrupt_received) {
-      swap();
-      sort();
-      mate();
-      std::random_shuffle (children_, children_ + popSize_, rnd);
-
-      // Draw citizens to canvas
-      for(int i=0; i < popSize_; i++) {
-        int c = children_[i].dna;
-        int x = i % width_;
-        int y = (int)(i / width_);
-        canvas()->SetPixel(x, y, R(c), G(c), B(c));
-      }
-
-      // When we reach the 85% fitness threshold...
-      if(is85PercentFit()) {
-        // ...set a new random target_
-        target_ = rand() & 0xFFFFFF;
-
-        // Randomly mutate everyone for sake of new colors
-        for (int i = 0; i < popSize_; ++i) {
-          mutate(children_[i]);
-        }
-      }
-      usleep(delay_ms_ * 1000);
-    }
-  }
-
-private:
-  /// citizen will hold dna information, a 24-bit color value.
-  struct citizen {
-    citizen() { }
-
-    citizen(int chrom)
-      : dna(chrom) {
-    }
-
-    int dna;
-  };
-
-  /// for sorting by fitness
-  class comparer {
-  public:
-    comparer(int t)
-      : target_(t) { }
-
-    inline bool operator() (const citizen& c1, const citizen& c2) {
-      return (calcFitness(c1.dna, target_) < calcFitness(c2.dna, target_));
-    }
-
-  private:
-    const int target_;
-  };
-
-  static int R(const int cit) { return at(cit, 16); }
-  static int G(const int cit) { return at(cit, 8); }
-  static int B(const int cit) { return at(cit, 0); }
-  static int at(const int v, const  int offset) { return (v >> offset) & 0xFF; }
-
-  /// fitness here is how "similar" the color is to the target
-  static int calcFitness(const int value, const int target) {
-    // Count the number of differing bits
-    int diffBits = 0;
-    for (unsigned int diff = value ^ target; diff; diff &= diff - 1) {
-      ++diffBits;
-    }
-    return diffBits;
-  }
-
-  /// sort by fitness so the most fit citizens are at the top of parents_
-  /// this is to establish an elite population of greatest fitness
-  /// the most fit members and some others are allowed to reproduce
-  /// to the next generation
-  void sort() {
-    std::sort(parents_, parents_ + popSize_, comparer(target_));
-  }
-
-  /// let the elites continue to the next generation children
-  /// randomly select 2 parents of (near)elite fitness and determine
-  /// how they will mate. after mating, randomly mutate citizens
-  void mate() {
-    // Adjust these for fun and profit
-    const float eliteRate = 0.30f;
-    const float mutationRate = 0.20f;
-
-    const int numElite = popSize_ * eliteRate;
-    for (int i = 0; i < numElite; ++i) {
-      children_[i] = parents_[i];
-    }
-
-    for (int i = numElite; i < popSize_; ++i) {
-      //select the parents randomly
-      const float sexuallyActive = 1.0 - eliteRate;
-      const int p1 = rand() % (int)(popSize_ * sexuallyActive);
-      const int p2 = rand() % (int)(popSize_ * sexuallyActive);
-      const int matingMask = (~0) << (rand() % bitsPerPixel);
-
-      // Make a baby
-      int baby = (parents_[p1].dna & matingMask)
-        | (parents_[p2].dna & ~matingMask);
-      children_[i].dna = baby;
-
-      // Mutate randomly based on mutation rate
-      if ((rand() / (float)RAND_MAX) < mutationRate) {
-        mutate(children_[i]);
-      }
-    }
-  }
-
-  /// parents make children,
-  /// children become parents,
-  /// and they make children...
-  void swap() {
-    citizen* temp = parents_;
-    parents_ = children_;
-    children_ = temp;
-  }
-
-  void mutate(citizen& c) {
-    // Flip a random bit
-    c.dna ^= 1 << (rand() % bitsPerPixel);
-  }
-
-  /// can adjust this threshold to make transition to new target seamless
-  bool is85PercentFit() {
-    int numFit = 0;
-    for (int i = 0; i < popSize_; ++i) {
-      if (calcFitness(children_[i].dna, target_) < 1) {
-        ++numFit;
-      }
-    }
-    return ((numFit / (float)popSize_) > 0.85f);
-  }
-
-  static const int bitsPerPixel = 24;
-  int popSize_;
-  int width_, height_;
-  int delay_ms_;
-  int target_;
-  citizen* children_;
-  citizen* parents_;
 };
 
 static int usage(const char *progname) {
@@ -1033,18 +660,7 @@ static int usage(const char *progname) {
   rgb_matrix::PrintMatrixFlags(stderr);
 
   fprintf(stderr, "Demos, choosen with -D\n");
-  fprintf(stderr, "\t0  - some rotating square\n"
-          "\t1  - forward scrolling an image (-m <scroll-ms>)\n"
-          "\t2  - backward scrolling an image (-m <scroll-ms>)\n"
-          "\t3  - test image: a square\n"
-          "\t4  - Pulsing color\n"
-          "\t5  - Grayscale Block\n"
-          "\t6  - Abelian sandpile model (-m <time-step-ms>)\n"
-          "\t7  - Conway's game of life (-m <time-step-ms>)\n"
-          "\t8  - Langton's ant (-m <time-step-ms>)\n"
-          "\t9  - Volume bars (-m <time-step-ms>)\n"
-          "\t10 - Evolution of color (-m <time-step-ms>)\n"
-          "\t11 - Brightness pulse generator\n");
+  fprintf(stderr, "\t0  - some rotating square\n");
   fprintf(stderr, "Example:\n\t%s -t 10 -D 1 runtext.ppm\n"
           "Scrolls the runtext for 10 seconds\n", progname);
   return 1;
@@ -1052,18 +668,31 @@ static int usage(const char *progname) {
 
 int main(int argc, char *argv[]) {
   int runtime_seconds = -1;
-  int demo = -1;
-  int scroll_ms = 30;
+  int demo = 0;
   int rotation = 0;
   bool large_display = false;
 
-  const char *demo_parameter = NULL;
+  printf("Opening i2C connection...\n");
+  if (hasI2C) {
+    wiringPiSetup();
+    try {
+      if ((i2c = wiringPiI2CSetup(AMG88xx_I2CADD)) < 0) {
+        printf("Error opening I2C channel...\n");
+        hasI2C = false;
+      }
+    } catch (const std::exception& err) {
+      printf("Could not open I2C connection...\n");
+      hasI2C = false;
+    }
+  }
+  if (hasI2C) hasI2C = writeI2C();
+
   RGBMatrix::Options matrix_options;
   rgb_matrix::RuntimeOptions runtime_opt;
 
   // These are the defaults when no command-line flags are given.
   matrix_options.rows = 32;
-  matrix_options.chain_length = 1;
+  matrix_options.chain_length = 6;
   matrix_options.parallel = 1;
 
   // First things first: extract the command line flags that contain
@@ -1072,82 +701,14 @@ int main(int argc, char *argv[]) {
     return usage(argv[0]);
   }
 
-  int opt;
-  while ((opt = getopt(argc, argv, "dD:t:r:P:c:p:b:m:LR:")) != -1) {
-    switch (opt) {
-    case 'D':
-      demo = atoi(optarg);
-      break;
-
-    case 't':
-      runtime_seconds = atoi(optarg);
-      break;
-
-    case 'm':
-      scroll_ms = atoi(optarg);
-      break;
-
-    case 'R':
-      rotation = atoi(optarg);
-      break;
-
-    case 'L':
-      if (matrix_options.chain_length == 1) {
-        // If this is still default, force the 64x64 arrangement.
-        matrix_options.chain_length = 4;
-      }
-      large_display = true;
-      break;
-
-      // These used to be options we understood, but deprecated now. Accept
-      // but don't mention in usage()
-    case 'd':
-      runtime_opt.daemon = 1;
-      break;
-
-    case 'r':
-      matrix_options.rows = atoi(optarg);
-      break;
-
-    case 'P':
-      matrix_options.parallel = atoi(optarg);
-      break;
-
-    case 'c':
-      matrix_options.chain_length = atoi(optarg);
-      break;
-
-    case 'p':
-      matrix_options.pwm_bits = atoi(optarg);
-      break;
-
-    case 'b':
-      matrix_options.brightness = atoi(optarg);
-      break;
-
-    default: /* '?' */
-      return usage(argv[0]);
-    }
-  }
-
-  if (optind < argc) {
-    demo_parameter = argv[optind];
-  }
-
-  if (demo < 0) {
-    fprintf(stderr, TERM_ERR "Expected required option -D <demo>\n" TERM_NORM);
-    return usage(argv[0]);
-  }
-
-  if (rotation % 90 != 0) {
-    fprintf(stderr, TERM_ERR "Rotation %d not allowed! "
-            "Only 0, 90, 180 and 270 are possible.\n" TERM_NORM, rotation);
-    return 1;
-  }
-
   RGBMatrix *matrix = CreateMatrixFromOptions(matrix_options, runtime_opt);
   if (matrix == NULL)
     return 1;
+
+  if (matrix_options.chain_length > 3) {
+    printf("Using LUMOS arrangement...\n");
+    matrix->ApplyStaticTransformer(LumosArrangementTransformer());
+  }
 
   if (large_display) {
     // Mapping the coordinates of a 32x128 display mapped to a square of 64x64.
@@ -1167,63 +728,7 @@ int main(int argc, char *argv[]) {
 
   // The ThreadedCanvasManipulator objects are filling
   // the matrix continuously.
-  ThreadedCanvasManipulator *image_gen = NULL;
-  switch (demo) {
-  case 0:
-    image_gen = new RotatingBlockGenerator(canvas);
-    break;
-
-  case 1:
-  case 2:
-    if (demo_parameter) {
-      ImageScroller *scroller = new ImageScroller(matrix,
-                                                  demo == 1 ? 1 : -1,
-                                                  scroll_ms);
-      if (!scroller->LoadPPM(demo_parameter))
-        return 1;
-      image_gen = scroller;
-    } else {
-      fprintf(stderr, "Demo %d Requires PPM image as parameter\n", demo);
-      return 1;
-    }
-    break;
-
-  case 3:
-    image_gen = new SimpleSquare(canvas);
-    break;
-
-  case 4:
-    image_gen = new ColorPulseGenerator(matrix);
-    break;
-
-  case 5:
-    image_gen = new GrayScaleBlock(canvas);
-    break;
-
-  case 6:
-    image_gen = new Sandpile(canvas, scroll_ms);
-    break;
-
-  case 7:
-    image_gen = new GameLife(canvas, scroll_ms);
-    break;
-
-  case 8:
-    image_gen = new Ant(canvas, scroll_ms);
-    break;
-
-  case 9:
-    image_gen = new VolumeBars(canvas, scroll_ms, canvas->width()/2);
-    break;
-
-  case 10:
-    image_gen = new GeneticColors(canvas, scroll_ms);
-    break;
-
-  case 11:
-    image_gen = new BrightnessPulseGenerator(matrix);
-    break;
-  }
+  ThreadedCanvasManipulator *image_gen = new SDFGen(canvas);
 
   if (image_gen == NULL)
     return usage(argv[0]);
@@ -1248,6 +753,10 @@ int main(int argc, char *argv[]) {
     while (!interrupt_received) {
       sleep(1); // Time doesn't really matter. The syscall will be interrupted.
     }
+  }
+
+  if (hasI2C) {
+    // wiringPi2CClose(i2c);
   }
 
   // Stop image generating thread. The delete triggers

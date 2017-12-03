@@ -1,0 +1,14 @@
+{
+  "files.associations": {
+    "bitset": "cpp",
+    "chrono": "cpp",
+    "memory": "cpp",
+    "__bit_reference": "cpp",
+    "vector": "cpp",
+    "ios": "cpp",
+    "cmath": "cpp",
+    "locale": "cpp",
+    "iterator": "cpp",
+    "iostream": "cpp"
+  }
+}

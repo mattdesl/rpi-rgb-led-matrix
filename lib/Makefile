@@ -5,6 +5,7 @@
 ##
 OBJECTS=gpio.o led-matrix.o options-initialize.o framebuffer.o \
         thread.o bdf-font.o graphics.o transformer.o led-matrix-c.o \
+        FastNoise.o \
 	hardware-mapping.o content-streamer.o
 TARGET=librgbmatrix
 
@@ -23,7 +24,7 @@ TARGET=librgbmatrix
 #   regular-pi1        # If you have an old Pi1 and regular didn't work.
 #   classic            # (deprecated) Classic Pi1/2/. Not used anymore.
 #   classic-pi1        # (deprecated) Classic pinout on Rasperry Pi 1
-HARDWARE_DESC?=regular
+HARDWARE_DESC?=adafruit-hat-pwm
 
 ###
 # After you change any of the following DEFINES, make sure to 'make' again.
@@ -105,7 +106,7 @@ HARDWARE_DESC?=regular
 # close together.
 # Then you can set the flag --led-gpio-mapping=adafruit-hat-pwm
 # .. or uncomment the following line.
-#HARDWARE_DESC=adafruit-hat-pwm
+HARDWARE_DESC=adafruit-hat-pwm
 
 # Typically, a Hub75 panel is split in two half displays, so that a 1:16
 # multiplexing actually multiplexes over two half displays and gives 32 lines.
@@ -118,7 +119,7 @@ HARDWARE_DESC?=regular
 
 # Experimental: Disable realtime throttling of the Linux kernel. Uncomment
 # if you see periodic flickering in particular with longer display chains.
-#DEFINES+=-DDISABLE_RT_THROTTLE
+DEFINES+=-DDISABLE_RT_THROTTLE
 
 # If someone gives additional values on the make commandline e.g.
 # make USER_DEFINES="-DSHOW_REFRESH_RATE"
@@ -127,7 +128,7 @@ DEFINES+=$(USER_DEFINES)
 DEFINES+=-DDEFAULT_HARDWARE='"$(HARDWARE_DESC)"'
 INCDIR=../include
 CFLAGS=-Wall -O3 -g -fPIC $(DEFINES)
-CXXFLAGS=$(CFLAGS)
+CXXFLAGS=-Wall -O3 -g -fPIC -std=c++11 $(DEFINES)
 
 all : $(TARGET).a $(TARGET).so.1
 

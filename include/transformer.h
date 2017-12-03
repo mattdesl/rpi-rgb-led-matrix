@@ -99,6 +99,17 @@ private:
   TransformCanvas *const canvas_;
 };
 
+class LumosArrangementTransformer : public CanvasTransformer {
+public:
+  LumosArrangementTransformer();
+  ~LumosArrangementTransformer();
+  virtual Canvas *Transform(Canvas *output);
+
+private:
+  class TransformCanvas;
+  TransformCanvas *const canvas_;
+};
+
 // Something used before, but it had a confusing 180 degree turn and was not
 // ready for multiple parallel chains. So consider using the
 // U-ArrangementTransformer instead.
